@@ -17,5 +17,5 @@
 .DS_Store
 
 # MIT 6.824 lab
-./MIT/6.824/bin
-./MIT/6.824/pkg
+MIT/6.824/bin
+MIT/6.824/pkg
