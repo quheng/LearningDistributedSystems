@@ -31,7 +31,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		wg.Add(1)
 		go func(taskNum int) {
 			for {
-				srv := <-registerChan // 这里我本来是放在 for-loop 外面的, 但是不知道为什么会有几个任务执行不了, 虽然对了, 但我依旧觉得应该放在外面
+				srv := <-registerChan // 拿 address 必须放在 for-loop 里面, 因为拿到的 srv 可能已经挂掉了, 所以每次都要拿新的
 				var inputFile string
 				if phase == mapPhase {
 					inputFile = mapFiles[taskNum]
@@ -42,7 +42,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				res := call(srv, "Worker.DoTask", newTask, nil)
 				if res { // task might failed
 					wg.Done()
-					registerChan <- srv
+					registerChan <- srv // 放 address 必须在 wg.done() 之后, 没有想清楚为什么
 					break
 				}
 			}
