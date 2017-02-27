@@ -2,7 +2,6 @@ package mapreduce
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 )
 
@@ -52,7 +51,6 @@ func doReduce(
 	keyValue := make(map[string][]string)
 
 	for m := 0; m < nMap; m++ {
-		fmt.Println(reduceName(jobName, m, reduceTaskNumber))
 		file, err := os.Open(reduceName(jobName, m, reduceTaskNumber))
 		if err != nil {
 			panic(err)

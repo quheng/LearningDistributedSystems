@@ -27,18 +27,18 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	}
 	var wg sync.WaitGroup
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, nOther)
-	for taskCounter := 0; taskCounter < 10; taskCounter++ {
-		srv := <-registerChan
+	for taskCounter := 0; taskCounter < ntasks; taskCounter++ {
 		wg.Add(1)
-		go func() {
+		go func(taskNum int) {
+			srv := <-registerChan
 			for {
 				var inputFile string
 				if phase == mapPhase {
-					inputFile = mapFiles[taskCounter]
+					inputFile = mapFiles[taskNum]
 				} else {
 					inputFile = ""
 				}
-				newTask := DoTaskArgs{jobName, inputFile, phase, taskCounter, nOther}
+				newTask := DoTaskArgs{jobName, inputFile, phase, taskNum, nOther}
 				res := call(srv, "Worker.DoTask", newTask, nil)
 				if res { // task might failed
 					wg.Done()
@@ -46,7 +46,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 					break
 				}
 			}
-		}()
+		}(taskCounter)
 	}
 	// All ntasks tasks have to be scheduled on workers, and only once all of
 	// them have been completed successfully should the function return.
