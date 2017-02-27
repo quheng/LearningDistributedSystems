@@ -2,7 +2,7 @@ package mapreduce
 
 import (
 	"fmt"
-	"io/ioutil"
+	"sync"
 )
 
 //
@@ -25,20 +25,28 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		ntasks = nReduce
 		nOther = len(mapFiles)
 	}
-	// var wg sync.WaitGroup
+	var wg sync.WaitGroup
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, nOther)
-	taskCounter := 0
-	for {
-		srv, isClose := <-registerChan
-		if !isClose || taskCounter == ntasks {
-			break
-		}
-		fileContent, err := ioutil.ReadFile(mapFiles[taskCounter])
-		if err != nil {
-			panic(err)
-		}
-		taskCounter++
-		call(srv, "Worker.DoTask", DoTaskArgs{jobName, string(fileContent), phase, ntasks, nOther}, nil)
+	for taskCounter := 0; taskCounter < 10; taskCounter++ {
+		srv := <-registerChan
+		wg.Add(1)
+		go func() {
+			for {
+				var inputFile string
+				if phase == mapPhase {
+					inputFile = mapFiles[taskCounter]
+				} else {
+					inputFile = ""
+				}
+				newTask := DoTaskArgs{jobName, inputFile, phase, taskCounter, nOther}
+				res := call(srv, "Worker.DoTask", newTask, nil)
+				if res { // task might failed
+					wg.Done()
+					registerChan <- srv
+					break
+				}
+			}
+		}()
 	}
 	// All ntasks tasks have to be scheduled on workers, and only once all of
 	// them have been completed successfully should the function return.
@@ -47,5 +55,6 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
+	wg.Wait()
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
