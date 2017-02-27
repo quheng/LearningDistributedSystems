@@ -30,8 +30,8 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	for taskCounter := 0; taskCounter < ntasks; taskCounter++ {
 		wg.Add(1)
 		go func(taskNum int) {
-			srv := <-registerChan
 			for {
+				srv := <-registerChan // 这里我本来是放在 for-loop 外面的, 但是不知道为什么会有几个任务执行不了, 虽然对了, 但我依旧觉得应该放在外面
 				var inputFile string
 				if phase == mapPhase {
 					inputFile = mapFiles[taskNum]
