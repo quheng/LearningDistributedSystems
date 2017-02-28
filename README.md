@@ -1,2 +1,1 @@
-# just for fun
-Learn some distributed systems for (great) good.
+passed all test, but still has a question in schedule.go line 45.
