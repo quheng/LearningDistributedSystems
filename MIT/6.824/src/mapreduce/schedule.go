@@ -42,7 +42,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				res := call(srv, "Worker.DoTask", newTask, nil)
 				if res { // task might failed
 					wg.Done()
-					registerChan <- srv // 放 address 必须在 wg.done() 之后, 没有想清楚为什么
+					registerChan <- srv // 放 address 必须在 wg.done() 之后, 没有想清楚为什么, 一个可能的原因是 registerChan 没有 buffer.
 					break
 				}
 			}
