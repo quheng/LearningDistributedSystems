@@ -63,13 +63,11 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// customer state
-	state               int                     // server state, can be LEADER, FOLLOWER or CANDIDATE
-	gotEntriesChan      chan AppendEntriesArgs  // got entries
-	gotEntriesReplyChan chan AppendEntriesReply // got server response to an entry
-	checkEntriesChan    chan bool               // take or reject this Entries
-	gotRequestVoteChan  chan RequestVoteArgs    // got request vote
-	gotVotesReplyChan   chan RequestVoteReply   // got vote
-	grantVoteChan       chan bool               // grant vote or not
+	state              int                    // server state, can be LEADER, FOLLOWER or CANDIDATE
+	gotEntriesChan     chan AppendEntriesArgs // got entries
+	checkEntriesChan   chan bool              // take or reject this Entries
+	gotRequestVoteChan chan RequestVoteArgs   // got request vote
+	grantVoteChan      chan bool              // grant vote or not
 
 	// persistent state on all servers
 	currentTerm int           // latest term server has seen( initialized to 0 on first boot, increases monotonically)
@@ -197,10 +195,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs, reply *RequestVoteReply, ch chan RequestVoteReply) bool {
 	ok := server.Call("Raft.RequestVote", args, reply)
 	if ok {
-		rf.gotVotesReplyChan <- *reply
+		ch <- *reply
 	}
 	return ok
 }
@@ -236,10 +234,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	return
 }
 
-func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan AppendEntriesReply) bool {
 	ok := server.Call("Raft.AppendEntries", args, reply)
 	if ok {
-		rf.gotEntriesReplyChan <- *reply
+		ch <- *reply
 	}
 	return ok
 }
@@ -295,11 +293,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = FOLLOWER
 	rf.gotEntriesChan = make(chan AppendEntriesArgs)
-	rf.gotEntriesReplyChan = make(chan AppendEntriesReply)
 	rf.checkEntriesChan = make(chan bool)
 
 	rf.gotRequestVoteChan = make(chan RequestVoteArgs)
-	rf.gotVotesReplyChan = make(chan RequestVoteReply)
 	rf.grantVoteChan = make(chan bool)
 
 	rf.currentTerm = 0
@@ -339,7 +335,8 @@ func getElectionTimeout() <-chan time.Time {
 	return time.After(time.Duration(randTime) * time.Millisecond)
 }
 
-func (rf *Raft) sendHeartbeatToServers() {
+func (rf *Raft) sendEntriesToServers() <-chan AppendEntriesReply {
+	replayChan := make(chan AppendEntriesReply)
 	rf.mu.Lock()
 	appendRntriesArgs := AppendEntriesArgs{
 		rf.currentTerm,
@@ -351,11 +348,12 @@ func (rf *Raft) sendHeartbeatToServers() {
 	appendRntriesReply := new(AppendEntriesReply)
 	rf.mu.Unlock()
 	for _, server := range rf.peers {
-		go rf.sendAppendEntries(server, &appendRntriesArgs, appendRntriesReply)
+		go rf.sendAppendEntries(server, &appendRntriesArgs, appendRntriesReply, replayChan)
 	}
+	return replayChan
 }
 
-func (rf *Raft) sendRequestVoteToServers() {
+func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 	rf.mu.Lock()
 	requestVoteArgs := RequestVoteArgs{
 		rf.currentTerm,
@@ -364,9 +362,11 @@ func (rf *Raft) sendRequestVoteToServers() {
 		rf.lastApplied} // todo
 	requestVoteReply := new(RequestVoteReply)
 	rf.mu.Unlock()
+	replayChan := make(chan RequestVoteReply)
 	for _, server := range rf.peers {
-		go rf.sendRequestVote(server, &requestVoteArgs, requestVoteReply)
+		go rf.sendRequestVote(server, &requestVoteArgs, requestVoteReply, replayChan)
 	}
+	return replayChan
 }
 
 // follower state
@@ -430,14 +430,23 @@ func (rf *Raft) followerStuff() {
 func (rf *Raft) leaderStuff() {
 	for {
 		heartbeatTimeout := time.After(HEART_BEETS_INTERVAL)
+		replyChan := rf.sendEntriesToServers()
 		select {
-		case <-rf.gotEntriesReplyChan:
+		case <-replyChan:
+			{
+				// todo
+			}
+		case <-rf.gotEntriesChan:
+			{
+				// todo
+			}
+		case <-rf.gotRequestVoteChan:
 			{
 				// todo
 			}
 		case <-heartbeatTimeout:
 			{
-				rf.sendHeartbeatToServers()
+
 			}
 		}
 	}
@@ -458,14 +467,14 @@ func (rf *Raft) candidateStuff() {
 	rf.votedFor = rf.me
 	electionTimeout := getElectionTimeout()
 	rf.mu.Unlock()
-	rf.sendRequestVoteToServers()
+	replayChan := rf.sendRequestVoteToServers()
 	gotVotes := 0
 LOOP:
 	for {
 		select {
 		// (a)
 		// wins an election if it receives votes from a majority of the servers in the full cluster for the same term.
-		case <-rf.gotVotesReplyChan:
+		case <-replayChan:
 			{
 				gotVotes++
 				if gotVotes > len(rf.peers)/2 {
@@ -487,9 +496,14 @@ LOOP:
 				if entries.Term >= rf.currentTerm {
 					rf.state = FOLLOWER
 					rf.currentTerm = entries.Term
+					rf.checkEntriesChan <- true // todo
 				}
 				rf.mu.Unlock()
 				break LOOP
+			}
+		case <-rf.gotRequestVoteChan:
+			{
+				rf.grantVoteChan <- false
 			}
 		// (c)
 		// start a new election by incrementing its term and initiating another round of Request- Vote RPCs.
