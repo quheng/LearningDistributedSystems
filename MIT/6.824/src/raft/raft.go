@@ -345,9 +345,9 @@ func (rf *Raft) sendEntriesToServers() <-chan AppendEntriesReply {
 		rf.currentTerm, // PreLogTerm todo
 		nil,            // Entries todo
 		rf.commitIndex}
-	appendRntriesReply := new(AppendEntriesReply)
 	rf.mu.Unlock()
 	for _, server := range rf.peers {
+		appendRntriesReply := new(AppendEntriesReply)
 		go rf.sendAppendEntries(server, &appendRntriesArgs, appendRntriesReply, replayChan)
 	}
 	return replayChan
@@ -360,10 +360,10 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 		rf.me,
 		rf.commitIndex, // todo
 		rf.lastApplied} // todo
-	requestVoteReply := new(RequestVoteReply)
 	rf.mu.Unlock()
 	replayChan := make(chan RequestVoteReply)
 	for _, server := range rf.peers {
+		requestVoteReply := new(RequestVoteReply)
 		go rf.sendRequestVote(server, &requestVoteArgs, requestVoteReply, replayChan)
 	}
 	return replayChan
