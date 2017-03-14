@@ -377,9 +377,37 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 	return replayChan
 }
 
+// return true if found another leader
+func (rf *Raft) gotEntries(entries AppendEntriesArgs) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("%v %v got entries in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, entries.Term)
+	if entries.Term > rf.currentTerm {
+		rf.state = FOLLOWER
+		rf.currentTerm = entries.Term
+		rf.checkEntriesChan <- true // todo
+		return true
+	}
+	return false
+}
+
+// return true if found another leader
+func (rf *Raft) gotRequesVote(request RequestVoteArgs) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("%v %v got request vote in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, request.Term)
+	if request.Term > rf.currentTerm {
+		rf.state = FOLLOWER
+		rf.currentTerm = request.Term
+		rf.grantVoteChan <- true
+		return true
+	}
+	rf.grantVoteChan <- false
+	return false
+}
+
 // follower state
 func (rf *Raft) followerStuff() {
-	t := time.Now()
 FOLLOWER_LOOP:
 	for {
 		select {
@@ -391,7 +419,6 @@ FOLLOWER_LOOP:
 				// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 				// 4. Append any new entries not already in the log
 				// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-				t = time.Now()
 				// 1
 				if gotEntriesArgs.Term < rf.currentTerm {
 					rf.checkEntriesChan <- false
@@ -411,8 +438,7 @@ FOLLOWER_LOOP:
 				// 2.
 				//  a.If votedFor is null or candidateId
 				//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
-				t = time.Now()
-				DPrintf("!!!!!!!!!!!!!requestVoteArgs %v, %v", rf.me, time.Since(t))
+
 				// 1
 				var result bool
 				if requestVoteArgs.Term < rf.currentTerm {
@@ -436,8 +462,7 @@ FOLLOWER_LOOP:
 		// RPC from current leader or granting vote to candidate: convert to candidate
 		case <-getElectionTimeout(): // received requests will refresh time
 			{
-				DPrintf("%v getElectionTimeout %v/n", rf.me, time.Now())
-				t = time.Now()
+				DPrintf("%v getElectionTimeout/n", rf.me)
 				rf.mu.Lock()
 				rf.state = CANDIDATE
 				rf.mu.Unlock()
@@ -450,27 +475,26 @@ FOLLOWER_LOOP:
 func (rf *Raft) leaderStuff() {
 	replyChan := make(chan AppendEntriesReply)
 	heartbeat := time.Tick(HEART_BEETS_INTERVAL)
-LLEADER_LOOP:
+LEADER_LOOP:
 	for {
 		select {
 		case <-replyChan:
 			{
 				// todo
 			}
-		case gotEntriesArgs := <-rf.gotEntriesChan:
+		case entries := <-rf.gotEntriesChan:
 			{
-				rf.mu.Lock()
-				if gotEntriesArgs.Term > rf.currentTerm {
-					rf.state = FOLLOWER
-					rf.currentTerm = gotEntriesArgs.Term
-					rf.mu.Unlock()
-					break LLEADER_LOOP
+				isFoundOtherLeader := rf.gotEntries(entries)
+				if isFoundOtherLeader {
+					break LEADER_LOOP
 				}
-				rf.mu.Unlock()
 			}
-		case <-rf.gotRequestVoteChan:
+		case request := <-rf.gotRequestVoteChan:
 			{
-				// todo
+				isFoundOtherLeader := rf.gotRequesVote(request)
+				if isFoundOtherLeader {
+					break LEADER_LOOP
+				}
 			}
 		case <-heartbeat:
 			{
@@ -504,24 +528,28 @@ CANDIDATE_LOOP:
 		// wins an election if it receives votes from a majority of the servers in the full cluster for the same term.
 		case replay := <-replayChan:
 			{
-				DPrintf("%v receive %v", rf.me, replay)
-				rf.mu.Lock() // notice defer is function scope
+				isAchieved := func() bool {
+					DPrintf("%v receive votes %v", rf.me, replay)
+					rf.mu.Lock() // notice defer is function scope
+					defer rf.mu.Unlock()
 
-				if replay.Term > rf.currentTerm {
-					rf.currentTerm = replay.Term
-					rf.mu.Unlock()
-					break
-				}
+					if replay.Term > rf.currentTerm {
+						rf.currentTerm = replay.Term
+						return false
+					}
 
-				if !replay.VoteGranted {
-					rf.mu.Unlock()
-					break
-				}
-				rf.mu.Unlock()
-				gotVotes++
-				DPrintf("%v got votes require %v in term %v", rf.me, len(rf.peers)/2, rf.currentTerm)
-				if gotVotes > len(rf.peers)/2 {
-					rf.state = LEADER
+					if !replay.VoteGranted {
+						return false
+					}
+					gotVotes++
+					DPrintf("follower %v got %v votes require %v in term %v", rf.me, gotVotes, len(rf.peers)/2+1, rf.currentTerm)
+					if gotVotes > len(rf.peers)/2 {
+						rf.state = LEADER
+						return true
+					}
+					return false
+				}()
+				if isAchieved {
 					break CANDIDATE_LOOP
 				}
 			}
@@ -533,24 +561,23 @@ CANDIDATE_LOOP:
 		// then the candidate rejects the RPC and con- tinues in candidate state.
 		case entries := <-rf.gotEntriesChan:
 			{
-				rf.mu.Lock()
-				if entries.Term > rf.currentTerm {
-					rf.state = FOLLOWER
-					rf.currentTerm = entries.Term
-					rf.checkEntriesChan <- true // todo
-					rf.mu.Unlock()
+				isFoundOtherLeader := rf.gotEntries(entries)
+				if isFoundOtherLeader {
 					break CANDIDATE_LOOP
 				}
-				rf.mu.Unlock()
 			}
-		case <-rf.gotRequestVoteChan:
+		case request := <-rf.gotRequestVoteChan:
 			{
-				rf.grantVoteChan <- false
+				isFoundOtherLeader := rf.gotRequesVote(request)
+				if isFoundOtherLeader {
+					break CANDIDATE_LOOP
+				}
 			}
 		// (c)
 		// start a new election by incrementing its term and initiating another round of Request- Vote RPCs.
 		case <-electionTimeout:
 			{
+				//incrementing term in next candidate loop
 				break CANDIDATE_LOOP
 			}
 		}
