@@ -33,7 +33,7 @@ const (
 	LEADER    = "LEADER"
 )
 
-const HEART_BEETS_INTERVAL = 150 * time.Millisecond
+const HEART_BEETS_INTERVAL = 120 * time.Millisecond
 const MIN_ELECTION_TIME_OUT = 600
 const MAX_ELECTION_TIME_OUT = 950
 
@@ -379,28 +379,29 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 
 // follower state
 func (rf *Raft) followerStuff() {
+	t := time.Now()
 FOLLOWER_LOOP:
 	for {
 		select {
 		// get entries from leader
-		case appendEntriesArgs := <-rf.gotEntriesChan:
+		case gotEntriesArgs := <-rf.gotEntriesChan:
 			{
 				// 1. Reply false if term < currentTerm (§5.1)
 				// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 				// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 				// 4. Append any new entries not already in the log
 				// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-
+				t = time.Now()
 				// 1
-				if appendEntriesArgs.Term < rf.currentTerm {
+				if gotEntriesArgs.Term < rf.currentTerm {
 					rf.checkEntriesChan <- false
-					return
+					break
 				}
 				// todo 2345
 				rf.mu.Lock()
-				rf.currentTerm = appendEntriesArgs.Term
+				rf.currentTerm = gotEntriesArgs.Term
 				rf.checkEntriesChan <- true
-				DPrintf("follower %v received AppendEntries from %v in term %v\n", rf.me, appendEntriesArgs.LeaderID, appendEntriesArgs.Term)
+				DPrintf("follower %v received AppendEntries from %v in term %v\n", rf.me, gotEntriesArgs.LeaderID, gotEntriesArgs.Term)
 				rf.mu.Unlock()
 			}
 		// got an vote request from candidate
@@ -410,7 +411,8 @@ FOLLOWER_LOOP:
 				// 2.
 				//  a.If votedFor is null or candidateId
 				//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
-
+				t = time.Now()
+				DPrintf("!!!!!!!!!!!!!requestVoteArgs %v, %v", rf.me, time.Since(t))
 				// 1
 				var result bool
 				if requestVoteArgs.Term < rf.currentTerm {
@@ -434,6 +436,8 @@ FOLLOWER_LOOP:
 		// RPC from current leader or granting vote to candidate: convert to candidate
 		case <-getElectionTimeout(): // received requests will refresh time
 			{
+				DPrintf("%v getElectionTimeout %v/n", rf.me, time.Now())
+				t = time.Now()
 				rf.mu.Lock()
 				rf.state = CANDIDATE
 				rf.mu.Unlock()
@@ -445,22 +449,30 @@ FOLLOWER_LOOP:
 
 func (rf *Raft) leaderStuff() {
 	replyChan := make(chan AppendEntriesReply)
+	heartbeat := time.Tick(HEART_BEETS_INTERVAL)
+LLEADER_LOOP:
 	for {
-		heartbeatTimeout := time.After(HEART_BEETS_INTERVAL)
 		select {
 		case <-replyChan:
 			{
 				// todo
 			}
-		case <-rf.gotEntriesChan:
+		case gotEntriesArgs := <-rf.gotEntriesChan:
 			{
-				// todo
+				rf.mu.Lock()
+				if gotEntriesArgs.Term > rf.currentTerm {
+					rf.state = FOLLOWER
+					rf.currentTerm = gotEntriesArgs.Term
+					rf.mu.Unlock()
+					break LLEADER_LOOP
+				}
+				rf.mu.Unlock()
 			}
 		case <-rf.gotRequestVoteChan:
 			{
 				// todo
 			}
-		case <-heartbeatTimeout:
+		case <-heartbeat:
 			{
 				rf.sendEntriesToServers(replyChan)
 			}
@@ -485,7 +497,7 @@ func (rf *Raft) candidateStuff() {
 	rf.mu.Unlock()
 	replayChan := rf.sendRequestVoteToServers()
 	gotVotes := 1 // initial to it self
-LOOP:
+CANDIDATE_LOOP:
 	for {
 		select {
 		// (a)
@@ -510,7 +522,7 @@ LOOP:
 				DPrintf("%v got votes require %v in term %v", rf.me, len(rf.peers)/2, rf.currentTerm)
 				if gotVotes > len(rf.peers)/2 {
 					rf.state = LEADER
-					break LOOP
+					break CANDIDATE_LOOP
 				}
 			}
 		// (b)
@@ -522,13 +534,14 @@ LOOP:
 		case entries := <-rf.gotEntriesChan:
 			{
 				rf.mu.Lock()
-				if entries.Term >= rf.currentTerm {
+				if entries.Term > rf.currentTerm {
 					rf.state = FOLLOWER
 					rf.currentTerm = entries.Term
 					rf.checkEntriesChan <- true // todo
+					rf.mu.Unlock()
+					break CANDIDATE_LOOP
 				}
 				rf.mu.Unlock()
-				break LOOP
 			}
 		case <-rf.gotRequestVoteChan:
 			{
@@ -538,7 +551,7 @@ LOOP:
 		// start a new election by incrementing its term and initiating another round of Request- Vote RPCs.
 		case <-electionTimeout:
 			{
-				break LOOP
+				break CANDIDATE_LOOP
 			}
 		}
 	}
