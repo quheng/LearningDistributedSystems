@@ -378,21 +378,7 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 }
 
 // return true if found another leader
-func (rf *Raft) gotEntries(entries AppendEntriesArgs) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	DPrintf("%v %v got entries in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, entries.Term)
-	if entries.Term > rf.currentTerm {
-		rf.state = FOLLOWER
-		rf.currentTerm = entries.Term
-		rf.checkEntriesChan <- true // todo
-		return true
-	}
-	return false
-}
-
-// return true if found another leader
-func (rf *Raft) gotRequesVote(request RequestVoteArgs) bool {
+func (rf *Raft) gotRequestVote(request RequestVoteArgs) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("%v %v got request vote in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, request.Term)
@@ -472,6 +458,22 @@ FOLLOWER_LOOP:
 	}
 }
 
+// used in leader or candidate state
+// if discovers that its term is out of date, it immediately reverts to follower state.
+// if receives a request with a stale term number. it rejects the request
+func (rf *Raft) gotEntries(entries AppendEntriesArgs) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("%v %v got entries in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, entries.Term)
+	if entries.Term > rf.currentTerm {
+		rf.state = FOLLOWER
+		rf.currentTerm = entries.Term
+		rf.checkEntriesChan <- true // todo
+		return true
+	}
+	return false
+}
+
 func (rf *Raft) leaderStuff() {
 	replyChan := make(chan AppendEntriesReply)
 	heartbeat := time.Tick(HEART_BEETS_INTERVAL)
@@ -491,7 +493,7 @@ LEADER_LOOP:
 			}
 		case request := <-rf.gotRequestVoteChan:
 			{
-				isFoundOtherLeader := rf.gotRequesVote(request)
+				isFoundOtherLeader := rf.gotRequestVote(request)
 				if isFoundOtherLeader {
 					break LEADER_LOOP
 				}
@@ -568,7 +570,7 @@ CANDIDATE_LOOP:
 			}
 		case request := <-rf.gotRequestVoteChan:
 			{
-				isFoundOtherLeader := rf.gotRequesVote(request)
+				isFoundOtherLeader := rf.gotRequestVote(request)
 				if isFoundOtherLeader {
 					break CANDIDATE_LOOP
 				}
