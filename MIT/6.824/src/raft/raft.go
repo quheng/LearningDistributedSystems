@@ -465,7 +465,7 @@ func (rf *Raft) gotEntries(entries AppendEntriesArgs) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("%v %v got entries in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, entries.Term)
-	if entries.Term > rf.currentTerm {
+	if entries.Term >= rf.currentTerm { // Equal for candidate state. In a given state, there is only one leader
 		rf.state = FOLLOWER
 		rf.currentTerm = entries.Term
 		rf.checkEntriesChan <- true // todo
@@ -526,8 +526,8 @@ func (rf *Raft) candidateStuff() {
 CANDIDATE_LOOP:
 	for {
 		select {
-		// (a)
-		// wins an election if it receives votes from a majority of the servers in the full cluster for the same term.
+		// (a) wins an election
+		// receives votes from a majority of the servers in the full cluster for the same term.
 		case replay := <-replayChan:
 			{
 				isAchieved := func() bool {
@@ -555,12 +555,12 @@ CANDIDATE_LOOP:
 					break CANDIDATE_LOOP
 				}
 			}
-		// (b)
+		// (b) another server established itself as leader
 		// If the leader’s term (included in its RPC)
 		// is at least as large as the candidate’s current term,
 		// then the candidate recognizes the leader as legitimate and
 		// returns to follower state. If the term in the RPC is smaller than the candidate’s current term,
-		// then the candidate rejects the RPC and con- tinues in candidate state.
+		// then the candidate rejects the RPC and continues in candidate state.
 		case entries := <-rf.gotEntriesChan:
 			{
 				isFoundOtherLeader := rf.gotEntries(entries)
@@ -575,8 +575,8 @@ CANDIDATE_LOOP:
 					break CANDIDATE_LOOP
 				}
 			}
-		// (c)
-		// start a new election by incrementing its term and initiating another round of Request- Vote RPCs.
+		// (c) a period of time goes by with no winner
+		// start a new election by incrementing its term and initiating another round of Request-Vote RPCs.
 		case <-electionTimeout:
 			{
 				//incrementing term in next candidate loop
