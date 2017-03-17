@@ -43,6 +43,12 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
+// contains command for state machine, and term when entry was received by leader
+type Log struct {
+	Term    int         // when it was created
+	Command interface{} // command
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -64,9 +70,9 @@ type Raft struct {
 	grantVoteChan      chan bool              // grant vote or not
 
 	// persistent state on all servers
-	currentTerm int           // latest term server has seen( initialized to 0 on first boot, increases monotonically)
-	votedFor    int           // candidateId that received vode in current term(or null if none)
-	log         []interface{} // log entries; each entry contains command for state machine, and term when entry was received by leader
+	currentTerm int   // latest term server has seen( initialized to 0 on first boot, increases monotonically)
+	votedFor    int   // candidateId that received vode in current term(or null if none)
+	log         []Log // log entries; each entry contains command for state machine, and term when entry was received by leader
 
 	// volatile state on all servers
 	commitIndex int // index of highest log entry known to be committed (initialized to 0, increases monotonically)
@@ -388,6 +394,7 @@ func (rf *Raft) gotRequestVote(request RequestVoteArgs) bool {
 
 // follower state
 func (rf *Raft) followerStuff() {
+	timeOut := getElectionTimeout() // note: if the term in the AppendEntries arguments is outdated, do not reset timer
 FOLLOWER_LOOP:
 	for {
 		select {
@@ -410,6 +417,7 @@ FOLLOWER_LOOP:
 				rf.checkEntriesChan <- true
 				DPrintf("follower %v received AppendEntries from %v in term %v\n", rf.me, gotEntriesArgs.LeaderID, gotEntriesArgs.Term)
 				rf.mu.Unlock()
+				timeOut = getElectionTimeout()
 			}
 		// got an vote request from candidate
 		case requestVoteArgs := <-rf.gotRequestVoteChan:
@@ -417,7 +425,7 @@ FOLLOWER_LOOP:
 				// 1. Reply false if term < currentTerm (§5.1)
 				// 2.
 				//  a.If votedFor is null or candidateId
-				//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+				//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.4)
 
 				// 1
 				var result bool
@@ -434,11 +442,20 @@ FOLLOWER_LOOP:
 					rf.votedFor = requestVoteArgs.CandidateID
 				}
 
-				// 2 todo 2b
+				// 2 a
 				if rf.votedFor == -1 || rf.votedFor == requestVoteArgs.CandidateID {
 					result = true
 				} else {
 					result = false
+				}
+
+				// 2 b  // todo
+				lastLog := rf.log[len(rf.log)]
+				if lastLog.Term > requestVoteArgs.LastLogTerm {
+
+				}
+				if result {
+					timeOut = getElectionTimeout()
 				}
 				rf.grantVoteChan <- result
 				DPrintf("follower %v received RequestVote from %v in term %v, result %v \n", rf.me, requestVoteArgs.CandidateID, requestVoteArgs.Term, result)
@@ -446,7 +463,7 @@ FOLLOWER_LOOP:
 			}
 		// If election timeout elapses without receiving AppendEntries
 		// RPC from current leader or granting vote to candidate: convert to candidate
-		case <-getElectionTimeout(): // received requests will refresh time
+		case <-timeOut: // received requests will refresh time
 			{
 				DPrintf("%v getElectionTimeout/n", rf.me)
 				rf.mu.Lock()
