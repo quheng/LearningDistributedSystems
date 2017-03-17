@@ -1,13 +1,8 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, term, isLeader)
 //   start agreement on a new log entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
@@ -15,7 +10,6 @@ package raft
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
 //   in the same server.
-//
 
 import (
 	"bytes"
@@ -433,8 +427,14 @@ FOLLOWER_LOOP:
 					break
 				}
 
-				// 2 todo 2b
+				// ADDITION. check for reelection.
 				rf.mu.Lock()
+				if requestVoteArgs.Term > rf.currentTerm {
+					rf.currentTerm = requestVoteArgs.Term
+					rf.votedFor = requestVoteArgs.CandidateID
+				}
+
+				// 2 todo 2b
 				if rf.votedFor == -1 || rf.votedFor == requestVoteArgs.CandidateID {
 					result = true
 				} else {
