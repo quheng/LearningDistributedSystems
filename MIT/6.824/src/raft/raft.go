@@ -379,11 +379,13 @@ FOLLOWER_LOOP:
 
 				// 1
 				if entriesArgs.Term < rf.currentTerm {
+					DPrintf("follower %v reject entries because of stale term\n", rf.me)
 					rf.checkEntriesChan <- false
 					break
 				}
 				// 2
 				if entriesArgs.PrevLogIndex > rf.commitIndex {
+					DPrintf("follower %v reject entries because of stale index\n", rf.me)
 					rf.checkEntriesChan <- false
 					break
 				}
