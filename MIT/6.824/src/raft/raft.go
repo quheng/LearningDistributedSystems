@@ -375,23 +375,38 @@ FOLLOWER_LOOP:
 	for {
 		select {
 		// get entries from leader
-		case gotEntriesArgs := <-rf.gotEntriesChan:
+		case entriesArgs := <-rf.gotEntriesChan:
 			{
 				// 1. Reply false if term < currentTerm (§5.1)
 				// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 				// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
 				// 4. Append any new entries not already in the log
 				// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+
 				// 1
-				if gotEntriesArgs.Term < rf.currentTerm {
+				if entriesArgs.Term < rf.currentTerm {
 					rf.checkEntriesChan <- false
 					break
 				}
-				// todo 2345
+				// 2
+				if entriesArgs.PrevLogIndex > rf.commitIndex {
+					rf.checkEntriesChan <- false
+					break
+				}
+
+				// 3 just append in logs
 				rf.mu.Lock()
-				rf.currentTerm = gotEntriesArgs.Term
+				rf.currentTerm = entriesArgs.Term
 				rf.checkEntriesChan <- true
-				DPrintf("follower %v received AppendEntries from %v in term %v\n", rf.me, gotEntriesArgs.LeaderID, gotEntriesArgs.Term)
+				// todo append entries into log
+				if entriesArgs.LeaderCommit > rf.commitIndex {
+					if entriesArgs.LeaderCommit > len(rf.log) {
+						rf.commitIndex = len(rf.log)
+					} else {
+						rf.commitIndex = entriesArgs.LeaderCommit
+					}
+				}
+				DPrintf("follower %v received AppendEntries %v in term %v\n", rf.me, entriesArgs, rf.currentTerm)
 				rf.mu.Unlock()
 				timeOut = getElectionTimeout()
 			}
@@ -402,20 +417,15 @@ FOLLOWER_LOOP:
 				// 2.
 				//  a.If votedFor is null or candidateId
 				//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.4)
+				rf.mu.Lock()
 
 				// 1
 				var result bool
 				if requestVoteArgs.Term < rf.currentTerm {
 					rf.grantVoteChan <- false
 					DPrintf("follower %v received RequestVote from %v in term %v, result false \n", rf.me, requestVoteArgs.CandidateID, requestVoteArgs.Term)
+					rf.mu.Unlock()
 					break
-				}
-
-				// ADDITION. check for reelection.
-				rf.mu.Lock()
-				if requestVoteArgs.Term > rf.currentTerm {
-					rf.currentTerm = requestVoteArgs.Term
-					rf.votedFor = requestVoteArgs.CandidateID
 				}
 
 				// 2 a
@@ -434,14 +444,14 @@ FOLLOWER_LOOP:
 					timeOut = getElectionTimeout()
 				}
 				rf.grantVoteChan <- result
-				DPrintf("follower %v received RequestVote from %v in term %v, result %v \n", rf.me, requestVoteArgs.CandidateID, requestVoteArgs.Term, result)
+				DPrintf("follower %v received RequestVote %v in term %v, result %v \n", rf.me, requestVoteArgs, requestVoteArgs.Term, result)
 				rf.mu.Unlock()
 			}
 		// If election timeout elapses without receiving AppendEntries
 		// RPC from current leader or granting vote to candidate: convert to candidate
 		case <-timeOut: // received requests will refresh time
 			{
-				DPrintf("%v getElectionTimeout/n", rf.me)
+				DPrintf("%v getElectionTimeout \n", rf.me)
 				rf.mu.Lock()
 				rf.state = CANDIDATE
 				rf.mu.Unlock()
