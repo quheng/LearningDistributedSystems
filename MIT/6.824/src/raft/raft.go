@@ -14,6 +14,7 @@ package raft
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -95,6 +96,7 @@ func (rf *Raft) persist() {
 	encoder := gob.NewEncoder(writer)
 
 	rf.mu.Lock()
+	fmt.Println("99")
 	defer rf.mu.Unlock()
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.votedFor)
@@ -353,11 +355,9 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 // you should first step down and adopt their term (thereby resetting votedFor),
 // and then handle the RPC
 func (rf *Raft) resetState(term int) {
-	rf.mu.Lock()
 	rf.state = FOLLOWER
 	rf.currentTerm = term
 	rf.votedFor = -1
-	rf.mu.Unlock()
 }
 
 // follower state
