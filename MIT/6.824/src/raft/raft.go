@@ -151,7 +151,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // just send reply to main goroutine and handle it
 func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs, reply *RequestVoteReply, ch chan RequestVoteReply) bool {
 	ok := server.Call("Raft.RequestVote", args, reply)
-	DPrintf("%v sendRequestVote in term %v", rf.me, rf.currentTerm)
 	if ok {
 		ch <- *reply
 	}
@@ -208,7 +207,6 @@ func (rf *Raft) sendEntriesToServers(replayChan chan AppendEntriesReply, entries
 			preLogTerm,     // term of prevLogIndex entry
 			entries,        // log entries to store (empty for heartbeat; may send more than one for efficiency) todo  内容从prevLogIndex 到现在?
 			rf.commitIndex} // leader’s commitIndex
-		DPrintf("%v sendEntries in Term %v", rf.me, rf.currentTerm)
 		appendEntriesReply := new(AppendEntriesReply)
 		go rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply, replayChan)
 	}
@@ -384,7 +382,7 @@ FOLLOWER_LOOP:
 					break
 				}
 				// 2
-				if entriesArgs.PrevLogIndex > rf.commitIndex {
+				if entriesArgs.PrevLogIndex > rf.commitIndex+1 { // todo check PrevLogIndex
 					DPrintf("follower %v reject entries because of stale index\n", rf.me)
 					rf.checkEntriesChan <- false
 					break
