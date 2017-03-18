@@ -27,7 +27,7 @@ const (
 	LEADER    = "LEADER"
 )
 
-const heartBeetsInterval = 120 * time.Millisecond
+const heartBeetsInterval = 130 * time.Millisecond
 const minElectionTimeOut = 600
 const macElectionTimeOut = 950
 
@@ -197,13 +197,17 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 func (rf *Raft) sendEntriesToServers(replayChan chan AppendEntriesReply, entries []interface{}) {
 	for index, server := range rf.peers {
 		prevLogIndex := rf.nextIndex[index]
+		preLogTerm := 0
+		if prevLogIndex < rf.commitIndex {
+			preLogTerm = rf.log[prevLogIndex-1].Term
+		}
 		appendEntriesArgs := AppendEntriesArgs{
-			rf.currentTerm,              // leader's term
-			rf.me,                       // leader's id
-			prevLogIndex,                // index of log entry immediately preceding new ones
-			rf.log[prevLogIndex-1].Term, // term of prevLogIndex entry
-			entries,                     // log entries to store (empty for heartbeat; may send more than one for efficiency) todo  内容从prevLogIndex 到现在?
-			rf.commitIndex}              // leader’s commitIndex
+			rf.currentTerm, // leader's term
+			rf.me,          // leader's id
+			prevLogIndex,   // index of log entry immediately preceding new ones
+			preLogTerm,     // term of prevLogIndex entry
+			entries,        // log entries to store (empty for heartbeat; may send more than one for efficiency) todo  内容从prevLogIndex 到现在?
+			rf.commitIndex} // leader’s commitIndex
 		DPrintf("%v sendEntries in Term %v", rf.me, rf.currentTerm)
 		appendEntriesReply := new(AppendEntriesReply)
 		go rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply, replayChan)
@@ -328,11 +332,15 @@ func getElectionTimeout() <-chan time.Time {
 
 func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 	rf.mu.Lock()
+	lastLogTerm := -1
+	if rf.commitIndex > 0 {
+		lastLogTerm = rf.log[rf.commitIndex-1].Term
+	}
 	requestVoteArgs := RequestVoteArgs{
 		rf.currentTerm,
 		rf.me,
 		rf.commitIndex,
-		rf.log[rf.commitIndex].Term}
+		lastLogTerm}
 	DPrintf("%v sendRequestVote in Term %v", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	replayChan := make(chan RequestVoteReply)
@@ -352,20 +360,6 @@ func (rf *Raft) resetState(term int) {
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.mu.Unlock()
-}
-
-// return true if found another leader
-func (rf *Raft) gotRequestVote(request RequestVoteArgs) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	DPrintf("%v %v got request vote in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, request.Term)
-	if request.Term > rf.currentTerm {
-		rf.resetState(request.Term)
-		rf.grantVoteChan <- true
-		return true
-	}
-	rf.grantVoteChan <- false
-	return false
 }
 
 // follower state
@@ -424,22 +418,29 @@ FOLLOWER_LOOP:
 				if requestVoteArgs.Term < rf.currentTerm {
 					rf.grantVoteChan <- false
 					DPrintf("follower %v received RequestVote from %v in term %v, result false \n", rf.me, requestVoteArgs.CandidateID, requestVoteArgs.Term)
+					DPrintf("reject because stale term\n")
 					rf.mu.Unlock()
 					break
+				}
+
+				if requestVoteArgs.Term > rf.currentTerm {
+					rf.currentTerm = requestVoteArgs.Term
+					rf.votedFor = requestVoteArgs.CandidateID
 				}
 
 				// 2 a
 				if rf.votedFor == -1 || rf.votedFor == requestVoteArgs.CandidateID {
 					result = true
 				} else {
+					DPrintf("reject because voted for %v\n", rf.votedFor)
 					result = false
 				}
 
-				// 2 b  // todo
-				// lastLog := rf.log[len(rf.log)]
-				// if lastLog.Term > requestVoteArgs.LastLogTerm {
-
-				// }
+				// 2 b
+				if rf.commitIndex > requestVoteArgs.LastLogIndex {
+					DPrintf("reject because stale log \n")
+					result = false
+				}
 				if result {
 					timeOut = getElectionTimeout()
 				}
@@ -462,15 +463,31 @@ FOLLOWER_LOOP:
 }
 
 // used in leader or candidate state
+// return true if found another leader
+func (rf *Raft) gotRequestVote(request RequestVoteArgs) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("%v %v got request vote in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, request.Term)
+	if request.Term > rf.currentTerm {
+		rf.resetState(request.Term)
+		rf.grantVoteChan <- true
+		return true
+	}
+	rf.grantVoteChan <- false
+	return false
+}
+
+// used in leader or candidate state
 // if discovers that its term is out of date, it immediately reverts to follower state.
 // if receives a request with a stale term number. it rejects the request
 func (rf *Raft) gotEntries(entries AppendEntriesArgs) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("%v %v got entries in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, entries.Term)
-	if entries.Term >= rf.currentTerm { // Equal for candidate state. In a given state, there is only one leader
+	if rf.state == LEADER && entries.Term > rf.currentTerm ||
+		rf.state == CANDIDATE && entries.Term >= rf.currentTerm {
 		rf.resetState(entries.Term)
-		rf.checkEntriesChan <- true // todo
+		rf.checkEntriesChan <- true // todo apply entries
 		return true
 	}
 	return false
