@@ -196,13 +196,14 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 
 func (rf *Raft) sendEntriesToServers(replayChan chan AppendEntriesReply, entries []interface{}) {
 	for index, server := range rf.peers {
+		prevLogIndex := rf.nextIndex[index]
 		appendEntriesArgs := AppendEntriesArgs{
-			rf.currentTerm,      // leader's term
-			rf.me,               // leader's id
-			rf.commitIndex,      // PrevLogIndex
-			rf.currentTerm,      // PreLogTerm
-			entries,             // Entries
-			rf.nextIndex[index]} // index of log entries immediately preceding, check?
+			rf.currentTerm,              // leader's term
+			rf.me,                       // leader's id
+			prevLogIndex,                // index of log entry immediately preceding new ones
+			rf.log[prevLogIndex-1].Term, // term of prevLogIndex entry
+			entries,                     // log entries to store (empty for heartbeat; may send more than one for efficiency) todo  内容从prevLogIndex 到现在?
+			rf.commitIndex}              // leader’s commitIndex
 		DPrintf("%v sendEntries in Term %v", rf.me, rf.currentTerm)
 		appendEntriesReply := new(AppendEntriesReply)
 		go rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply, replayChan)
@@ -238,7 +239,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, Log{rf.currentTerm, command})
 		rf.commitIndex = len(rf.log)
 		rf.persist()
+
+		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
 		go rf.makeAgreement(command)
+
+		// todo comment in 6.824, we should return result immediately. but in paper, we should wait for the result
 		return rf.commitIndex, rf.currentTerm, isLeader
 	}
 	return -1, -1, isLeader
@@ -281,7 +286,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	// rf.log = make([]) todo
+	rf.log = make([]Log, 0)
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -326,11 +331,10 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 	requestVoteArgs := RequestVoteArgs{
 		rf.currentTerm,
 		rf.me,
-		rf.commitIndex, // todo
-		rf.lastApplied} // todo
+		rf.commitIndex,
+		rf.log[rf.commitIndex].Term}
 	DPrintf("%v sendRequestVote in Term %v", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
-	// DPrintf("%v sendRequestVote in term %v\n", rf.me, rf.currentTerm)
 	replayChan := make(chan RequestVoteReply)
 	for _, server := range rf.peers {
 		requestVoteReply := new(RequestVoteReply)
@@ -339,13 +343,15 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 	return replayChan
 }
 
-//  incoming RequestVote RPC has a higher term that you,
+// incoming RequestVote RPC has a higher term that you,
 // you should first step down and adopt their term (thereby resetting votedFor),
 // and then handle the RPC
 func (rf *Raft) resetState(term int) {
+	rf.mu.Lock()
 	rf.state = FOLLOWER
 	rf.currentTerm = term
 	rf.votedFor = -1
+	rf.mu.Unlock()
 }
 
 // return true if found another leader
