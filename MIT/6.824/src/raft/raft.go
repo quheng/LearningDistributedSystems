@@ -541,6 +541,7 @@ func (rf *Raft) candidateStuff() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	electionTimeout := getElectionTimeout()
+	t0 := time.Now()
 	rf.mu.Unlock()
 	replayChan := rf.sendRequestVoteToServers()
 	gotVotes := 1 // initial to it self
@@ -601,6 +602,8 @@ CANDIDATE_LOOP:
 		case <-electionTimeout:
 			{
 				//incrementing term in next candidate loop
+				DPrintf("%v time out!\n", time.Since(t0))
+				t0 = time.Now()
 				break CANDIDATE_LOOP
 			}
 		}
