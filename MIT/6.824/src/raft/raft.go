@@ -85,11 +85,9 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.state == LEADER
 }
 
-//
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-//
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -105,11 +103,8 @@ func (rf *Raft) persist() {
 	rf.persister.SaveRaftState(data)
 }
 
-//
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	// Your code here (2C).
-	// Example:
 	reader := bytes.NewBuffer(data)
 	decoder := gob.NewDecoder(reader)
 
@@ -156,6 +151,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // just send reply to main goroutine and handle it
 func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs, reply *RequestVoteReply, ch chan RequestVoteReply) bool {
 	ok := server.Call("Raft.RequestVote", args, reply)
+	DPrintf("%v sendRequestVote in term %v", rf.me, rf.currentTerm)
 	if ok {
 		ch <- *reply
 	}
@@ -173,9 +169,7 @@ type AppendEntriesArgs struct {
 }
 
 // AppendEntriesReply field names must start with capital letters!
-//
 type AppendEntriesReply struct {
-	// Your data here (2A).
 	Term    int  // currentTerm, for candidate to update itself
 	Success bool // if follower contained entry matching prevLogIndex and prevLogTerm
 }
@@ -193,6 +187,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan AppendEntriesReply) bool {
 	ok := server.Call("Raft.AppendEntries", args, reply)
+	DPrintf("%v send entries in term %v\n", rf.me, rf.currentTerm)
 	if ok {
 		ch <- *reply
 	}
@@ -291,8 +286,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.nextIndex = make([]int, 0)
-	rf.matchIndex = make([]int, 0)
+	rf.nextIndex = make([]int, len(peers))
+	for index := range peers {
+		rf.nextIndex[index] = rf.commitIndex + 1
+	}
+
+	rf.matchIndex = make([]int, 0) // todo
 
 	rf.state = FOLLOWER
 
