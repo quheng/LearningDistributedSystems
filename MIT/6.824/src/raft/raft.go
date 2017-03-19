@@ -14,7 +14,6 @@ package raft
 import (
 	"bytes"
 	"encoding/gob"
-	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -28,9 +27,9 @@ const (
 	LEADER    = "LEADER"
 )
 
-const heartBeetsInterval = 130 * time.Millisecond
-const minElectionTimeOut = 600
-const maxElectionTimeOut = 950
+const heartBeetsInterval = 105 * time.Millisecond
+const minElectionTimeOut = 500
+const maxElectionTimeOut = 800
 
 // ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -90,10 +89,6 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	writer := new(bytes.Buffer)
 	encoder := gob.NewEncoder(writer)
-
-	rf.mu.Lock()
-	fmt.Println("99")
-	defer rf.mu.Unlock()
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.votedFor)
 	encoder.Encode(rf.log)
@@ -141,12 +136,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.4)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.CandidateID == rf.me { // reject it self, avoid refresh reelect time
-		DPrintf("%v reject itself in term %v\n", rf.me, rf.currentTerm)
-		rf.gotRequestVoteChan <- false
-		reply.VoteGranted = false
-		return
-	}
 	// 1
 	if args.Term < rf.currentTerm {
 		DPrintf("%v reject RequestVote because stale in term %v\n", rf.me, rf.currentTerm)
@@ -184,7 +173,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 	rf.votedFor = args.CandidateID
-	DPrintf("%v accept votes for %v\n", rf.me, rf.votedFor)
+	DPrintf("%v accept votes for %v in term %v\n", rf.me, rf.votedFor, rf.currentTerm)
 	rf.gotRequestVoteChan <- true
 	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
@@ -289,7 +278,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	rf.gotEntriesChan <- true
-	DPrintf("%v accept entries %v in term %v %v\n", rf.me, args, rf.currentTerm)
+	DPrintf("%v accept entries %v in term %v\n", rf.me, args, rf.currentTerm)
 	return
 }
 
@@ -324,10 +313,13 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 }
 
 func (rf *Raft) sendEntriesToServers(replayChan chan AppendEntriesReply) {
+	DPrintf("%v send entries to all servers in term %v", rf.me, rf.currentTerm)
 	for index, server := range rf.peers {
-		appendEntriesArgs := rf.setAppendEntriesArgs(index)
-		appendEntriesReply := new(AppendEntriesReply)
-		go rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply, replayChan)
+		if index != rf.me {
+			appendEntriesArgs := rf.setAppendEntriesArgs(index)
+			appendEntriesReply := new(AppendEntriesReply)
+			go rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply, replayChan)
+		}
 	}
 }
 
@@ -360,7 +352,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, Log{rf.currentTerm, command})
 		rf.commitIndex = len(rf.log)
 		rf.persist()
-
 		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
 		go rf.makeAgreement()
 
@@ -424,6 +415,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func(rf *Raft) {
 		for {
 			rf.mu.Lock()
+			DPrintf("%v is %v", rf.me, rf.state)
 			state := rf.state
 			rf.mu.Unlock()
 			switch state {
@@ -458,9 +450,11 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 	DPrintf("%v sendRequestVote in Term %v", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	replayChan := make(chan RequestVoteReply)
-	for _, server := range rf.peers {
-		requestVoteReply := new(RequestVoteReply)
-		go rf.sendRequestVote(server, &requestVoteArgs, requestVoteReply, replayChan)
+	for index, server := range rf.peers {
+		if index != rf.me {
+			requestVoteReply := new(RequestVoteReply)
+			go rf.sendRequestVote(server, &requestVoteArgs, requestVoteReply, replayChan)
+		}
 	}
 	return replayChan
 }
@@ -492,6 +486,7 @@ FOLLOWER_LOOP:
 		case result := <-rf.gotRequestVoteChan:
 			{
 				if result {
+					DPrintf("%v refresh timeout", rf.me)
 					timeOut = getElectionTimeout()
 				}
 			}
