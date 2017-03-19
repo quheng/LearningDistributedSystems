@@ -141,6 +141,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.4)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if args.CandidateID == rf.me { // reject it self, avoid refresh reelect time
+		DPrintf("%v reject itself in term %v\n", rf.me, rf.currentTerm)
+		rf.gotRequestVoteChan <- false
+		reply.VoteGranted = false
+		return
+	}
 	// 1
 	if args.Term < rf.currentTerm {
 		DPrintf("%v reject RequestVote because stale in term %v\n", rf.me, rf.currentTerm)
@@ -417,10 +423,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go func(rf *Raft) {
 		for {
-			DPrintf("%v is %v", rf.me, rf.state)
-			// todo
-			// If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
-			switch rf.state {
+			rf.mu.Lock()
+			state := rf.state
+			rf.mu.Unlock()
+			switch state {
 			case FOLLOWER:
 				rf.followerStuff()
 			case CANDIDATE:
