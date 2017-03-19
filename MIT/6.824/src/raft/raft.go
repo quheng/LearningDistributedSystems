@@ -90,8 +90,6 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
 	writer := new(bytes.Buffer)
 	encoder := gob.NewEncoder(writer)
 
@@ -145,7 +143,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
 	reply.VoteGranted = <-rf.grantVoteChan
-	DPrintf("%v got request vote from %v, result %v\n", rf.me, args.CandidateID, reply)
+	DPrintf("%v got request vote %v in term %v, result %v\n", rf.me, args, rf.currentTerm, reply)
 	return
 }
 
@@ -161,12 +159,12 @@ func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs,
 
 // AppendEntriesArgs field names must start with capital letters!
 type AppendEntriesArgs struct {
-	Term         int           // leader's term
-	LeaderID     int           // so follower can redirect clients
-	PrevLogIndex int           // index of log entry immediately preceding new ones
-	PreLogTerm   int           // term of prevLogIndex entry
-	Entries      []interface{} // log entries to store (empty for heartbeat; may send more than one for efficiency)
-	LeaderCommit int           // leader's commitIndex
+	Term         int   // leader's term
+	LeaderID     int   // so follower can redirect clients
+	PrevLogIndex int   // index of log entry immediately preceding new ones
+	PreLogTerm   int   // term of prevLogIndex entry
+	Entries      []Log // log entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int   // leader's commitIndex
 }
 
 // AppendEntriesReply field names must start with capital letters!
@@ -175,49 +173,56 @@ type AppendEntriesReply struct {
 	Success bool // if follower contained entry matching prevLogIndex and prevLogTerm
 }
 
-// AppendEntries got entries, send request to main goroutine and wait for reply
+// AppendEntries RPC handler
+// just send request to main goroutine and wait for reply
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	rf.gotEntriesChan <- *args
 	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
 	reply.Success = <-rf.checkEntriesChan
-	DPrintf("%v got entries from %v, result %v\n", rf.me, args.LeaderID, reply)
+	DPrintf("%v got entries %v in term %v, result %v\n", rf.me, args, rf.currentTerm, reply)
 	return
 }
 
+// sendAppendEntries callee
 func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan AppendEntriesReply) bool {
 	ok := server.Call("Raft.AppendEntries", args, reply)
-	DPrintf("%v send entries in term %v\n", rf.me, rf.currentTerm)
 	if ok {
 		ch <- *reply
 	}
 	return ok
 }
 
-func (rf *Raft) sendEntriesToServers(replayChan chan AppendEntriesReply, entries []interface{}) {
+func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
+	prevLogIndex := rf.nextIndex[server] - 1
+	preLogTerm := -1
+	logEntries := rf.log[prevLogIndex-1 : rf.commitIndex] // left-open-right-close, index = real index in logs + 1
+
+	if prevLogIndex < rf.commitIndex { // put previous log
+		preLogTerm = rf.log[prevLogIndex].Term
+	}
+	return AppendEntriesArgs{
+		rf.currentTerm, // leader's term
+		rf.me,          // leader's id
+		prevLogIndex,   // index of log entry immediately preceding new ones
+		preLogTerm,     // term of prevLogIndex entry
+		logEntries,     // log entries to store (empty for heartbeat; may send more than one for efficiency) todo  内容从prevLogIndex 到现在?
+		rf.commitIndex} // leader’s commitIndex
+}
+
+func (rf *Raft) sendEntriesToServers(replayChan chan AppendEntriesReply) {
 	for index, server := range rf.peers {
-		prevLogIndex := rf.nextIndex[index]
-		preLogTerm := 0
-		if prevLogIndex < rf.commitIndex {
-			preLogTerm = rf.log[prevLogIndex-1].Term
-		}
-		appendEntriesArgs := AppendEntriesArgs{
-			rf.currentTerm, // leader's term
-			rf.me,          // leader's id
-			prevLogIndex,   // index of log entry immediately preceding new ones
-			preLogTerm,     // term of prevLogIndex entry
-			entries,        // log entries to store (empty for heartbeat; may send more than one for efficiency) todo  内容从prevLogIndex 到现在?
-			rf.commitIndex} // leader’s commitIndex
+		appendEntriesArgs := rf.setAppendEntriesArgs(index)
 		appendEntriesReply := new(AppendEntriesReply)
 		go rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply, replayChan)
 	}
 }
 
-func (rf *Raft) makeAgreement(command interface{}) {
+func (rf *Raft) makeAgreement() {
 	replyChan := make(chan AppendEntriesReply)
-	rf.sendEntriesToServers(replyChan, []interface{}{command})
-	rf.applyMsgChan <- ApplyMsg{rf.commitIndex, command, false, nil} // todo Snapshot
+	rf.sendEntriesToServers(replyChan)
+	//rf.applyMsgChan <- ApplyMsg{rf.commitIndex, command, false, nil} // todo Snapshot
 	// todo
 }
 
@@ -245,7 +250,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.persist()
 
 		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
-		go rf.makeAgreement(command)
+		go rf.makeAgreement()
 
 		// todo comment in 6.824, we should return result immediately. but in paper, we should wait for the result
 		return rf.commitIndex, rf.currentTerm, isLeader
@@ -352,8 +357,8 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 }
 
 // incoming RequestVote RPC has a higher term that you,
-// you should first step down and adopt their term (thereby resetting votedFor),
-// and then handle the RPC
+// you should first step down and adopt their term (thereby resetting votedFor), and then handle the RPC
+// note: use lock
 func (rf *Raft) resetState(term int) {
 	rf.state = FOLLOWER
 	rf.currentTerm = term
@@ -392,7 +397,8 @@ FOLLOWER_LOOP:
 				rf.mu.Lock()
 				rf.currentTerm = entriesArgs.Term
 				rf.checkEntriesChan <- true
-				// todo append entries into log
+				rf.log = rf.log[:entriesArgs.PrevLogIndex]
+				rf.log = append(rf.log, entriesArgs.Entries...)
 				if entriesArgs.LeaderCommit > rf.commitIndex {
 					if entriesArgs.LeaderCommit > len(rf.log) {
 						rf.commitIndex = len(rf.log)
