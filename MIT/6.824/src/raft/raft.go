@@ -197,8 +197,12 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 	prevLogIndex := rf.nextIndex[server] - 1
 	preLogTerm := -1
-	logEntries := rf.log[prevLogIndex-1 : rf.commitIndex] // left-open-right-close, index = real index in logs + 1
-
+	var logEntries []Log
+	if prevLogIndex > 0 {
+		logEntries = rf.log[prevLogIndex-1 : rf.commitIndex] // left-open-right-close, index = real index in logs + 1
+	} else {
+		logEntries = nil
+	}
 	if prevLogIndex < rf.commitIndex { // put previous log
 		preLogTerm = rf.log[prevLogIndex].Term
 	}
@@ -526,7 +530,7 @@ LEADER_LOOP:
 		case <-heartbeat:
 			{
 				rf.mu.Lock()
-				rf.sendEntriesToServers(replyChan, nil)
+				rf.sendEntriesToServers(replyChan)
 				rf.mu.Unlock()
 			}
 		}
