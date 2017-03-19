@@ -57,11 +57,10 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 
 	// customer state
-	state              string               // server state, can be LEADER, FOLLOWER or CANDIDATE
-	gotEntriesChan     chan bool            // got entries, send whether accept these entries
-	gotRequestVoteChan chan RequestVoteArgs // got request vote
-	grantVoteChan      chan bool            // grant vote or not
-	applyMsgChan       chan ApplyMsg        // send an ApplyMsg to the service (or tester)
+	state              string        // server state, can be LEADER, FOLLOWER or CANDIDATE
+	gotEntriesChan     chan bool     // got entries, send whether accept these entries
+	gotRequestVoteChan chan bool     // got request vote, send whether accept the vote
+	applyMsgChan       chan ApplyMsg // send an ApplyMsg to the service (or tester)
 
 	// persistent state on all servers
 	currentTerm int   // latest term server has seen( initialized to 0 on first boot, increases monotonically)
@@ -135,14 +134,54 @@ type RequestVoteReply struct {
 }
 
 // RequestVote RPC handler.
-// just send request to main goroutine, and wait for reply
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	// 1. Reply false if term < currentTerm (§5.1)
+	// 2.
+	//  a. If votedFor is null or candidateId
+	//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.4)
 	rf.mu.Lock()
-	rf.gotRequestVoteChan <- *args
+	defer rf.mu.Unlock()
+	// 1
+	if args.Term < rf.currentTerm {
+		DPrintf("%v reject RequestVote because stale in term %v\n", rf.me, rf.currentTerm)
+		rf.gotRequestVoteChan <- false
+		reply.VoteGranted = false
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.resetState(args.Term)
+	}
+
+	// 2 a
+	if rf.votedFor != -1 && rf.votedFor != args.CandidateID {
+		DPrintf("%v reject because voted for %v\n", rf.me, rf.votedFor)
+		rf.gotRequestVoteChan <- false
+		reply.VoteGranted = false
+		return
+	}
+
+	// 2 b
+	if rf.commitIndex > 0 {
+		if rf.log[rf.commitIndex-1].Term > args.LastLogTerm {
+			DPrintf("%v reject because stale log term for %v\n", rf.me, rf.votedFor)
+			rf.gotRequestVoteChan <- false
+			reply.VoteGranted = false
+			return
+		}
+
+		if rf.log[rf.commitIndex-1].Term == args.LastLogTerm && rf.commitIndex > args.LastLogIndex {
+			DPrintf("%v reject because stale log index for %v\n", rf.me, rf.votedFor)
+			rf.gotRequestVoteChan <- false
+			reply.VoteGranted = false
+			return
+		}
+	}
+	rf.votedFor = args.CandidateID
+	DPrintf("%v accept votes for %v\n", rf.me, rf.votedFor)
+	rf.gotRequestVoteChan <- true
+	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
-	rf.mu.Unlock()
-	reply.VoteGranted = <-rf.grantVoteChan
-	DPrintf("%v got request vote %v in term %v, result %v\n", rf.me, args, rf.currentTerm, reply)
 	return
 }
 
@@ -354,10 +393,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = FOLLOWER
 	rf.gotEntriesChan = make(chan bool)
+	rf.gotRequestVoteChan = make(chan bool)
 	rf.applyMsgChan = applyCh
-
-	rf.gotRequestVoteChan = make(chan RequestVoteArgs)
-	rf.grantVoteChan = make(chan bool)
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
@@ -438,55 +475,19 @@ FOLLOWER_LOOP:
 	for {
 		select {
 		// get entries from leader
+		// only update election timeout when getting an illegal request
 		case result := <-rf.gotEntriesChan:
 			{
-				if result { // only update election timeout when getting an illegal entries
+				if result {
 					timeOut = getElectionTimeout()
 				}
 			}
 		// got an vote request from candidate
-		case requestVoteArgs := <-rf.gotRequestVoteChan:
+		case result := <-rf.gotRequestVoteChan:
 			{
-				// 1. Reply false if term < currentTerm (§5.1)
-				// 2.
-				//  a.If votedFor is null or candidateId
-				//  b. candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.4)
-				rf.mu.Lock()
-
-				// 1
-				var result bool
-				if requestVoteArgs.Term < rf.currentTerm {
-					rf.grantVoteChan <- false
-					DPrintf("follower %v received RequestVote from %v in term %v, result false \n", rf.me, requestVoteArgs.CandidateID, requestVoteArgs.Term)
-					DPrintf("reject because stale term\n")
-					rf.mu.Unlock()
-					break
-				}
-
-				if requestVoteArgs.Term > rf.currentTerm {
-					rf.currentTerm = requestVoteArgs.Term
-					rf.votedFor = requestVoteArgs.CandidateID
-				}
-
-				// 2 a
-				if rf.votedFor == -1 || rf.votedFor == requestVoteArgs.CandidateID {
-					result = true
-				} else {
-					DPrintf("reject because voted for %v\n", rf.votedFor)
-					result = false
-				}
-
-				// 2 b
-				if rf.commitIndex > requestVoteArgs.LastLogIndex {
-					DPrintf("reject because stale log \n")
-					result = false
-				}
 				if result {
 					timeOut = getElectionTimeout()
 				}
-				rf.grantVoteChan <- result
-				DPrintf("follower %v received RequestVote %v in term %v, result %v \n", rf.me, requestVoteArgs, requestVoteArgs.Term, result)
-				rf.mu.Unlock()
 			}
 		// If election timeout elapses without receiving AppendEntries
 		// RPC from current leader or granting vote to candidate: convert to candidate
@@ -500,21 +501,6 @@ FOLLOWER_LOOP:
 			}
 		}
 	}
-}
-
-// used in leader or candidate state
-// return true if found another leader
-func (rf *Raft) gotRequestVote(request RequestVoteArgs) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	DPrintf("%v %v got request vote in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, request.Term)
-	if request.Term > rf.currentTerm {
-		rf.resetState(request.Term)
-		rf.grantVoteChan <- true
-		return true
-	}
-	rf.grantVoteChan <- false
-	return false
 }
 
 func (rf *Raft) leaderStuff() {
@@ -533,10 +519,9 @@ LEADER_LOOP:
 					break LEADER_LOOP
 				}
 			}
-		case request := <-rf.gotRequestVoteChan:
+		case result := <-rf.gotRequestVoteChan:
 			{
-				isFoundOtherLeader := rf.gotRequestVote(request)
-				if isFoundOtherLeader {
+				if result {
 					break LEADER_LOOP
 				}
 			}
@@ -608,10 +593,9 @@ CANDIDATE_LOOP:
 					break CANDIDATE_LOOP
 				}
 			}
-		case request := <-rf.gotRequestVoteChan:
+		case result := <-rf.gotRequestVoteChan:
 			{
-				isFoundOtherLeader := rf.gotRequestVote(request)
-				if isFoundOtherLeader {
+				if result {
 					break CANDIDATE_LOOP
 				}
 			}
