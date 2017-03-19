@@ -180,12 +180,36 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // sendRequestVote RPC callee
 // just send reply to main goroutine and handle it
-func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs, reply *RequestVoteReply, ch chan RequestVoteReply) bool {
-	ok := server.Call("Raft.RequestVote", args, reply)
-	if ok {
-		ch <- *reply
+func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	return server.Call("Raft.RequestVote", args, reply)
+}
+
+func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
+	rf.mu.Lock()
+	lastLogTerm := -1
+	if rf.commitIndex > 0 {
+		lastLogTerm = rf.log[rf.commitIndex-1].Term
 	}
-	return ok
+	requestVoteArgs := RequestVoteArgs{
+		rf.currentTerm,
+		rf.me,
+		rf.commitIndex,
+		lastLogTerm}
+	DPrintf("%v sendRequestVote in Term %v", rf.me, rf.currentTerm)
+	rf.mu.Unlock()
+	replayChan := make(chan RequestVoteReply)
+	for index, server := range rf.peers {
+		if index != rf.me {
+			server := server
+			go func() {
+				requestVoteReply := new(RequestVoteReply)
+				if rf.sendRequestVote(server, &requestVoteArgs, requestVoteReply) {
+					replayChan <- *requestVoteReply
+				}
+			}()
+		}
+	}
+	return replayChan
 }
 
 // AppendEntriesArgs field names must start with capital letters!
@@ -426,29 +450,6 @@ func getElectionTimeout() <-chan time.Time {
 	return time.After(time.Duration(randTime) * time.Millisecond)
 }
 
-func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
-	rf.mu.Lock()
-	lastLogTerm := -1
-	if rf.commitIndex > 0 {
-		lastLogTerm = rf.log[rf.commitIndex-1].Term
-	}
-	requestVoteArgs := RequestVoteArgs{
-		rf.currentTerm,
-		rf.me,
-		rf.commitIndex,
-		lastLogTerm}
-	DPrintf("%v sendRequestVote in Term %v", rf.me, rf.currentTerm)
-	rf.mu.Unlock()
-	replayChan := make(chan RequestVoteReply)
-	for index, server := range rf.peers {
-		if index != rf.me {
-			requestVoteReply := new(RequestVoteReply)
-			go rf.sendRequestVote(server, &requestVoteArgs, requestVoteReply, replayChan)
-		}
-	}
-	return replayChan
-}
-
 // incoming RequestVote RPC has a higher term that you,
 // you should first step down and adopt their term (thereby resetting votedFor), and then handle the RPC
 // note: use lock in callee
@@ -534,9 +535,8 @@ func (rf *Raft) candidateStuff() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	electionTimeout := getElectionTimeout()
-	t0 := time.Now()
 	rf.mu.Unlock()
+	electionTimeout := getElectionTimeout()
 	replayChan := rf.sendRequestVoteToServers()
 	gotVotes := 1 // initial to it self
 CANDIDATE_LOOP:
@@ -590,8 +590,6 @@ CANDIDATE_LOOP:
 		case <-electionTimeout:
 			{
 				//incrementing term in next candidate loop
-				DPrintf("%v time out!\n", time.Since(t0))
-				t0 = time.Now()
 				break CANDIDATE_LOOP
 			}
 		}
