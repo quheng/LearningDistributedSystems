@@ -28,7 +28,7 @@ const (
 )
 
 const heartBeetsInterval = 105 * time.Millisecond
-const minElectionTimeOut = 500
+const minElectionTimeOut = 650
 const maxElectionTimeOut = 800
 
 // ApplyMsg as each Raft peer becomes aware that successive log entries are
@@ -101,8 +101,6 @@ func (rf *Raft) readPersist(data []byte) {
 	reader := bytes.NewBuffer(data)
 	decoder := gob.NewDecoder(reader)
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	decoder.Decode(&rf.currentTerm)
 	decoder.Decode(&rf.votedFor)
 	decoder.Decode(&rf.log)
@@ -283,12 +281,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 // sendAppendEntries callee
-func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan AppendEntriesReply) bool {
-	ok := server.Call("Raft.AppendEntries", args, reply)
-	if ok {
-		ch <- *reply
-	}
-	return ok
+func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	return server.Call("Raft.AppendEntries", args, reply)
 }
 
 func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
@@ -298,7 +292,7 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 	if prevLogIndex > 0 {
 		logEntries = rf.log[prevLogIndex-1 : rf.commitIndex] // left-open-right-close, index = real index in logs + 1
 	} else {
-		logEntries = nil
+		logEntries = rf.log
 	}
 	if prevLogIndex < rf.commitIndex { // put previous log
 		preLogTerm = rf.log[prevLogIndex].Term
@@ -312,22 +306,18 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 		rf.commitIndex} // leader’s commitIndex
 }
 
-func (rf *Raft) sendEntriesToServers(replayChan chan AppendEntriesReply) {
+func (rf *Raft) makeAgreement() {
 	DPrintf("%v send entries to all servers in term %v", rf.me, rf.currentTerm)
 	for index, server := range rf.peers {
 		if index != rf.me {
 			appendEntriesArgs := rf.setAppendEntriesArgs(index)
-			appendEntriesReply := new(AppendEntriesReply)
-			go rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply, replayChan)
+			server := server
+			go func() {
+				appendEntriesReply := new(AppendEntriesReply)
+				rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply)
+			}()
 		}
 	}
-}
-
-func (rf *Raft) makeAgreement() {
-	replyChan := make(chan AppendEntriesReply)
-	rf.sendEntriesToServers(replyChan)
-	//rf.applyMsgChan <- ApplyMsg{rf.commitIndex, command, false, nil} // todo Snapshot
-	// todo
 }
 
 // Start at the leader starts the process of adding a new operation to the log;
@@ -505,15 +495,10 @@ FOLLOWER_LOOP:
 }
 
 func (rf *Raft) leaderStuff() {
-	replyChan := make(chan AppendEntriesReply)
 	heartbeat := time.Tick(heartBeetsInterval)
 LEADER_LOOP:
 	for {
 		select {
-		case <-replyChan:
-			{
-				// todo
-			}
 		case result := <-rf.gotEntriesChan:
 			{
 				if result {
@@ -529,7 +514,7 @@ LEADER_LOOP:
 		case <-heartbeat:
 			{
 				rf.mu.Lock()
-				rf.sendEntriesToServers(replyChan)
+				rf.makeAgreement()
 				rf.mu.Unlock()
 			}
 		}
