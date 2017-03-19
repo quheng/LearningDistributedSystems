@@ -181,13 +181,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// if discovers that its term is out of date, it immediately reverts to follower state.
 	// if receives a request with a stale term number. it rejects the request
-	if args.Term > rf.currentTerm {
-		rf.resetState(args.Term)
-	} else {
+	if args.Term < rf.currentTerm {
 		DPrintf("%v reject entries because of stale term \n", rf.me)
 		rf.gotEntriesChan <- false
 		reply.Success = false
 		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.resetState(args.Term)
 	}
 
 	if rf.state == CANDIDATE {
