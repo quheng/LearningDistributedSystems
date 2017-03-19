@@ -30,7 +30,7 @@ const (
 
 const heartBeetsInterval = 130 * time.Millisecond
 const minElectionTimeOut = 600
-const macElectionTimeOut = 950
+const maxElectionTimeOut = 950
 
 // ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -57,12 +57,11 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 
 	// customer state
-	state              string                 // server state, can be LEADER, FOLLOWER or CANDIDATE
-	gotEntriesChan     chan AppendEntriesArgs // got entries
-	checkEntriesChan   chan bool              // take or reject this Entries
-	gotRequestVoteChan chan RequestVoteArgs   // got request vote
-	grantVoteChan      chan bool              // grant vote or not
-	applyMsgChan       chan ApplyMsg          // send an ApplyMsg to the service (or tester)
+	state              string               // server state, can be LEADER, FOLLOWER or CANDIDATE
+	gotEntriesChan     chan bool            // got entries, send whether accept these entries
+	gotRequestVoteChan chan RequestVoteArgs // got request vote
+	grantVoteChan      chan bool            // grant vote or not
+	applyMsgChan       chan ApplyMsg        // send an ApplyMsg to the service (or tester)
 
 	// persistent state on all servers
 	currentTerm int   // latest term server has seen( initialized to 0 on first boot, increases monotonically)
@@ -174,14 +173,76 @@ type AppendEntriesReply struct {
 }
 
 // AppendEntries RPC handler
-// just send request to main goroutine and wait for reply
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	rf.gotEntriesChan <- *args
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
-	rf.mu.Unlock()
-	reply.Success = <-rf.checkEntriesChan
-	DPrintf("%v got entries %v in term %v, result %v\n", rf.me, args, rf.currentTerm, reply)
+	DPrintf("%v %v receive entries %v in term %v\n", rf.state, rf.me, args, rf.currentTerm)
+
+	// if discovers that its term is out of date, it immediately reverts to follower state.
+	// if receives a request with a stale term number. it rejects the request
+	if args.Term > rf.currentTerm {
+		rf.resetState(args.Term)
+	} else {
+		DPrintf("%v reject entries because of stale term \n", rf.me)
+		rf.gotEntriesChan <- false
+		reply.Success = false
+		return
+	}
+
+	if rf.state == CANDIDATE {
+		if args.Term == rf.currentTerm {
+			rf.resetState(args.Term)
+		} else {
+			DPrintf("%v reject entries because of stale term \n", rf.me)
+			rf.gotEntriesChan <- false
+			reply.Success = false
+			return
+		}
+	}
+
+	// 1. Reply false if term < currentTerm (§5.1)
+	// 2. Reply false if log does not contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+	// 4. Append any new entries not already in the log
+	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+
+	// 1
+	if args.Term < rf.currentTerm {
+		DPrintf("%v reject entries because of stale term\n", rf.me)
+		rf.gotEntriesChan <- false
+		reply.Success = false
+		return
+	}
+	// 2
+	if args.PrevLogIndex > rf.commitIndex { // todo check PrevLogIndex
+		DPrintf("%v reject entries because of stale index\n", rf.me)
+		rf.gotEntriesChan <- false
+		reply.Success = false
+		return
+	}
+	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PreLogTerm {
+		DPrintf("%v reject entries because of term does not match \n", rf.me)
+		rf.gotEntriesChan <- false
+		reply.Success = false
+		return
+	}
+
+	// 3, 4just append in logs
+	rf.log = rf.log[:args.PrevLogIndex]
+	rf.log = append(rf.log, args.Entries...)
+	rf.commitIndex = len(rf.log)
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = len(rf.log)
+		} else {
+			rf.commitIndex = args.LeaderCommit
+		}
+	}
+
+	reply.Success = true
+	rf.gotEntriesChan <- true
+	DPrintf("%v accept entries %v in term %v %v\n", rf.me, args, rf.currentTerm)
 	return
 }
 
@@ -290,8 +351,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = FOLLOWER
-	rf.gotEntriesChan = make(chan AppendEntriesArgs)
-	rf.checkEntriesChan = make(chan bool)
+	rf.gotEntriesChan = make(chan bool)
 	rf.applyMsgChan = applyCh
 
 	rf.gotRequestVoteChan = make(chan RequestVoteArgs)
@@ -335,7 +395,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func getElectionTimeout() <-chan time.Time {
-	randTime := rand.Intn(macElectionTimeOut-minElectionTimeOut) + minElectionTimeOut
+	randTime := rand.Intn(maxElectionTimeOut-minElectionTimeOut) + minElectionTimeOut
 	return time.After(time.Duration(randTime) * time.Millisecond)
 }
 
@@ -362,7 +422,7 @@ func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 
 // incoming RequestVote RPC has a higher term that you,
 // you should first step down and adopt their term (thereby resetting votedFor), and then handle the RPC
-// note: use lock
+// note: use lock in callee
 func (rf *Raft) resetState(term int) {
 	rf.state = FOLLOWER
 	rf.currentTerm = term
@@ -376,43 +436,11 @@ FOLLOWER_LOOP:
 	for {
 		select {
 		// get entries from leader
-		case entriesArgs := <-rf.gotEntriesChan:
+		case result := <-rf.gotEntriesChan:
 			{
-				// 1. Reply false if term < currentTerm (§5.1)
-				// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-				// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-				// 4. Append any new entries not already in the log
-				// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-
-				// 1
-				if entriesArgs.Term < rf.currentTerm {
-					DPrintf("follower %v reject entries because of stale term\n", rf.me)
-					rf.checkEntriesChan <- false
-					break
+				if result { // only update election timeout when getting an illegal entries
+					timeOut = getElectionTimeout()
 				}
-				// 2
-				if entriesArgs.PrevLogIndex > rf.commitIndex+1 { // todo check PrevLogIndex
-					DPrintf("follower %v reject entries because of stale index\n", rf.me)
-					rf.checkEntriesChan <- false
-					break
-				}
-
-				// 3 just append in logs
-				rf.mu.Lock()
-				rf.currentTerm = entriesArgs.Term
-				rf.checkEntriesChan <- true
-				rf.log = rf.log[:entriesArgs.PrevLogIndex]
-				rf.log = append(rf.log, entriesArgs.Entries...)
-				if entriesArgs.LeaderCommit > rf.commitIndex {
-					if entriesArgs.LeaderCommit > len(rf.log) {
-						rf.commitIndex = len(rf.log)
-					} else {
-						rf.commitIndex = entriesArgs.LeaderCommit
-					}
-				}
-				DPrintf("follower %v received AppendEntries %v in term %v\n", rf.me, entriesArgs, rf.currentTerm)
-				rf.mu.Unlock()
-				timeOut = getElectionTimeout()
 			}
 		// got an vote request from candidate
 		case requestVoteArgs := <-rf.gotRequestVoteChan:
@@ -487,22 +515,6 @@ func (rf *Raft) gotRequestVote(request RequestVoteArgs) bool {
 	return false
 }
 
-// used in leader or candidate state
-// if discovers that its term is out of date, it immediately reverts to follower state.
-// if receives a request with a stale term number. it rejects the request
-func (rf *Raft) gotEntries(entries AppendEntriesArgs) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	DPrintf("%v %v got entries in term %v, the other leader's term is %v", rf.state, rf.me, rf.currentTerm, entries.Term)
-	if rf.state == LEADER && entries.Term > rf.currentTerm ||
-		rf.state == CANDIDATE && entries.Term >= rf.currentTerm {
-		rf.resetState(entries.Term)
-		rf.checkEntriesChan <- true // todo apply entries
-		return true
-	}
-	return false
-}
-
 func (rf *Raft) leaderStuff() {
 	replyChan := make(chan AppendEntriesReply)
 	heartbeat := time.Tick(heartBeetsInterval)
@@ -513,10 +525,9 @@ LEADER_LOOP:
 			{
 				// todo
 			}
-		case entries := <-rf.gotEntriesChan:
+		case result := <-rf.gotEntriesChan:
 			{
-				isFoundOtherLeader := rf.gotEntries(entries)
-				if isFoundOtherLeader {
+				if result {
 					break LEADER_LOOP
 				}
 			}
@@ -588,15 +599,10 @@ CANDIDATE_LOOP:
 				}
 			}
 		// (b) another server established itself as leader
-		// If the leader’s term (included in its RPC)
-		// is at least as large as the candidate’s current term,
-		// then the candidate recognizes the leader as legitimate and
-		// returns to follower state. If the term in the RPC is smaller than the candidate’s current term,
-		// then the candidate rejects the RPC and continues in candidate state.
-		case entries := <-rf.gotEntriesChan:
+		// handled in AppendEntries
+		case result := <-rf.gotEntriesChan:
 			{
-				isFoundOtherLeader := rf.gotEntries(entries)
-				if isFoundOtherLeader {
+				if result {
 					break CANDIDATE_LOOP
 				}
 			}
