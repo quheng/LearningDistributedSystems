@@ -279,7 +279,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PreLogTerm {
+	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex-1].Term != args.PreLogTerm {
 		DPrintf("%v reject entries because of term does not match \n", rf.me)
 		rf.gotEntriesChan <- false
 		reply.Success = false
@@ -287,7 +287,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 3, 4just append in logs
-	rf.log = rf.log[:args.PrevLogIndex]
+	if args.PrevLogIndex > 0 {
+		rf.log = rf.log[:args.PrevLogIndex]
+	}
 	rf.log = append(rf.log, args.Entries...)
 	rf.commitIndex = len(rf.log)
 	if args.LeaderCommit > rf.commitIndex {
@@ -309,17 +311,16 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 	return server.Call("Raft.AppendEntries", args, reply)
 }
 
+// todo 是不是需要加把锁
 func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 	prevLogIndex := rf.nextIndex[server] - 1
 	preLogTerm := -1
 	var logEntries []Log
 	if prevLogIndex > 0 {
-		logEntries = rf.log[prevLogIndex-1 : rf.commitIndex] // left-open-right-close, index = real index in logs + 1
+		logEntries = rf.log[prevLogIndex:rf.commitIndex] // left-open-right-close, index = real index in logs + 1, get log after prevLogIndex
+		preLogTerm = rf.log[prevLogIndex-1].Term
 	} else {
 		logEntries = rf.log
-	}
-	if prevLogIndex < rf.commitIndex { // put previous log
-		preLogTerm = rf.log[prevLogIndex].Term
 	}
 	return AppendEntriesArgs{
 		rf.currentTerm, // leader's term
@@ -334,11 +335,27 @@ func (rf *Raft) makeAgreement() {
 	DPrintf("%v send entries to all servers in term %v", rf.me, rf.currentTerm)
 	for index, server := range rf.peers {
 		if index != rf.me {
-			appendEntriesArgs := rf.setAppendEntriesArgs(index)
+			index := index
 			server := server
 			go func() {
-				appendEntriesReply := new(AppendEntriesReply)
-				rf.sendAppendEntries(server, &appendEntriesArgs, appendEntriesReply)
+				for {
+					reply := new(AppendEntriesReply)
+					reply.Success = false
+					appendEntriesArgs := rf.setAppendEntriesArgs(index)
+					ok := rf.sendAppendEntries(server, &appendEntriesArgs, reply)
+					if !ok {
+						return
+					}
+					if reply.Success {
+						rf.mu.Lock()
+						rf.nextIndex[index] = rf.commitIndex + 1
+						rf.mu.Unlock()
+						return
+					}
+					rf.mu.Lock()
+					rf.nextIndex[index]--
+					rf.mu.Unlock()
+				}
 			}()
 		}
 	}
@@ -362,6 +379,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.state == LEADER
 	defer rf.mu.Unlock()
 	if isLeader {
+		DPrintf("leader %v new log %v", rf.me, command)
 		// step 1, leader appends the command to its logs as a new entry
 		rf.log = append(rf.log, Log{rf.currentTerm, command})
 		rf.commitIndex = len(rf.log)
