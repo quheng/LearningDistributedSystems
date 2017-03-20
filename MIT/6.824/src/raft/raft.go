@@ -27,9 +27,9 @@ const (
 	LEADER    = "LEADER"
 )
 
-const heartBeetsInterval = 105 * time.Millisecond
-const minElectionTimeOut = 650
-const maxElectionTimeOut = 800
+const heartBeetsInterval = 120 * time.Millisecond
+const minElectionTimeOut = 750
+const maxElectionTimeOut = 900
 
 // ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -143,6 +143,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if args.Term > rf.currentTerm {
+		DPrintf("%v %v reset term %v to %v\n", rf.state, rf.me, rf.currentTerm, args.Term)
 		rf.resetState(args.Term)
 	}
 
@@ -290,8 +291,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > 0 {
 		rf.log = rf.log[:args.PrevLogIndex]
 	}
+
+	reply.Success = true
+	rf.gotEntriesChan <- true
+	for index, enter := range args.Entries {
+		applyMsg := ApplyMsg{rf.commitIndex + index + 1, enter.Command, false, nil} // todo
+		rf.applyMsgChan <- applyMsg
+	}
 	rf.log = append(rf.log, args.Entries...)
-	rf.commitIndex = len(rf.log)
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = len(rf.log)
@@ -300,12 +307,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	reply.Success = true
-	rf.gotEntriesChan <- true
-	if len(args.Entries) > 0 {
-		applyMsg := ApplyMsg{rf.commitIndex, rf.log[rf.commitIndex-1].Command, false, nil} // todo
-		rf.applyMsgChan <- applyMsg
-	}
 	DPrintf("%v accept entries %v in term %v\n", rf.me, args, rf.currentTerm)
 	return
 }
@@ -315,7 +316,7 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 	return server.Call("Raft.AppendEntries", args, reply)
 }
 
-// todo 是不是需要加把锁
+// callee add lock
 func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 	prevLogIndex := rf.nextIndex[server] - 1
 	preLogTerm := -1
@@ -342,10 +343,15 @@ func (rf *Raft) makeAgreement() {
 			index := index
 			server := server
 			go func() {
-				for {
+				rf.mu.Lock()
+				state := rf.state
+				rf.mu.Unlock()
+				for state == LEADER {
 					reply := new(AppendEntriesReply)
 					reply.Success = false
+					rf.mu.Lock()
 					appendEntriesArgs := rf.setAppendEntriesArgs(index)
+					rf.mu.Unlock()
 					ok := rf.sendAppendEntries(server, &appendEntriesArgs, reply)
 					if !ok {
 						return
@@ -359,6 +365,7 @@ func (rf *Raft) makeAgreement() {
 					rf.mu.Lock()
 					rf.nextIndex[index]--
 					rf.mu.Unlock()
+					return
 				}
 			}()
 		}
@@ -438,12 +445,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.nextIndex = make([]int, len(peers))
-	for index := range peers {
-		rf.nextIndex[index] = rf.commitIndex + 1
-	}
-
-	rf.matchIndex = make([]int, 0) // todo
+	rf.nextIndex = make([]int, len(peers)) // initialize in leader stuff
+	rf.matchIndex = make([]int, 0)         // todo
 
 	rf.state = FOLLOWER
 
@@ -521,8 +524,14 @@ FOLLOWER_LOOP:
 
 func (rf *Raft) leaderStuff() {
 	heartbeat := time.Tick(heartBeetsInterval)
+	rf.mu.Lock()
+	state := rf.state
+	for index := range rf.peers {
+		rf.nextIndex[index] = rf.commitIndex + 1
+	}
+	rf.mu.Unlock()
 LEADER_LOOP:
-	for {
+	for state == LEADER {
 		select {
 		case result := <-rf.gotEntriesChan:
 			{
@@ -543,6 +552,9 @@ LEADER_LOOP:
 				rf.mu.Unlock()
 			}
 		}
+		rf.mu.Lock()
+		state = rf.state
+		rf.mu.Unlock()
 	}
 }
 
@@ -559,12 +571,13 @@ func (rf *Raft) candidateStuff() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	state := rf.state
 	rf.mu.Unlock()
 	electionTimeout := getElectionTimeout()
 	replayChan := rf.sendRequestVoteToServers()
 	gotVotes := 1 // initial to it self
 CANDIDATE_LOOP:
-	for {
+	for state == CANDIDATE {
 		select {
 		// (a) wins an election
 		// receives votes from a majority of the servers in the full cluster for the same term.
@@ -617,5 +630,8 @@ CANDIDATE_LOOP:
 				break CANDIDATE_LOOP
 			}
 		}
+		rf.mu.Lock()
+		state = rf.state
+		rf.mu.Unlock()
 	}
 }
