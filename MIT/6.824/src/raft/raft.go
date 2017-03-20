@@ -274,7 +274,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	// 2
-	if args.PrevLogIndex > rf.commitIndex { // todo check PrevLogIndex
+	if args.PrevLogIndex > rf.commitIndex {
 		DPrintf("%v reject entries because of stale index\n", rf.me)
 		rf.gotEntriesChan <- false
 		reply.Success = false
@@ -332,7 +332,7 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 		rf.me,          // leader's id
 		prevLogIndex,   // index of log entry immediately preceding new ones
 		preLogTerm,     // term of prevLogIndex entry
-		logEntries,     // log entries to store (empty for heartbeat; may send more than one for efficiency) todo  内容从prevLogIndex 到现在?
+		logEntries,     // log entries to store (empty for heartbeat; may send more than one for efficiency)
 		rf.commitIndex} // leader’s commitIndex
 }
 
@@ -399,8 +399,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.persist()
 		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
 		go rf.makeAgreement()
-
-		// todo comment in 6.824, we should return result immediately. but in paper, we should wait for the result
 		return rf.commitIndex, rf.currentTerm, isLeader
 	}
 	return -1, -1, isLeader
