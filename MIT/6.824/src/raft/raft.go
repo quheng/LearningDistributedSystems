@@ -302,6 +302,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	rf.gotEntriesChan <- true
+	if len(args.Entries) > 0 {
+		applyMsg := ApplyMsg{rf.commitIndex, rf.log[rf.commitIndex-1].Command, false, nil} // todo
+		rf.applyMsgChan <- applyMsg
+	}
 	DPrintf("%v accept entries %v in term %v\n", rf.me, args, rf.currentTerm)
 	return
 }
@@ -383,6 +387,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// step 1, leader appends the command to its logs as a new entry
 		rf.log = append(rf.log, Log{rf.currentTerm, command})
 		rf.commitIndex = len(rf.log)
+		applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
+		rf.applyMsgChan <- applyMsg
 		rf.persist()
 		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
 		go rf.makeAgreement()
