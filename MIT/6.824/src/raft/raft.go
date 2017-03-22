@@ -372,6 +372,7 @@ func (rf *Raft) makeAgreement(command interface{}) {
 				rf.mu.Lock()
 				rf.commitIndex++
 				applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
+				rf.lastApplied = rf.commitIndex
 				rf.mu.Unlock()
 				DPrintf("leader %v applied %v in term %v", rf.me, applyMsg, rf.currentTerm)
 				rf.applyMsgChan <- applyMsg
