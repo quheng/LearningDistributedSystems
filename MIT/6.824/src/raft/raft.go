@@ -238,14 +238,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("%v %v receive entries %v in term %v\n", rf.state, rf.me, args, rf.currentTerm)
 
 	// if discovers that its term is out of date, it immediately reverts to follower state.
-	// if receives a request with a stale term number. it rejects the request
-	if args.Term < rf.currentTerm {
-		DPrintf("%v reject entries because of stale term \n", rf.me)
-		rf.gotEntriesChan <- false
-		reply.Success = false
-		return
-	}
-
 	if args.Term > rf.currentTerm {
 		rf.resetState(args.Term)
 	}
@@ -253,54 +245,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.state == CANDIDATE {
 		if args.Term == rf.currentTerm {
 			rf.resetState(args.Term)
-		} else {
-			DPrintf("%v reject entries because of stale term \n", rf.me)
-			rf.gotEntriesChan <- false
-			reply.Success = false
-			return
 		}
 	}
 
 	// 1. Reply false if term < currentTerm (§5.1)
-	// 2. Reply false if log does not contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-	// 4. Append any new entries not already in the log
-	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-
-	// 1
 	if args.Term < rf.currentTerm {
 		DPrintf("%v reject entries because of stale term\n", rf.me)
 		rf.gotEntriesChan <- false
 		reply.Success = false
 		return
 	}
-	// 2
-	if args.PrevLogIndex > rf.commitIndex {
+
+	// 2 Reply false if log does not contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	if rf.currentTerm == args.Term && args.PrevLogIndex > rf.commitIndex {
 		DPrintf("%v reject entries because of stale index\n", rf.me)
 		rf.gotEntriesChan <- false
 		reply.Success = false
 		return
 	}
-	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex-1].Term != args.PreLogTerm {
-		DPrintf("%v reject entries because of term does not match \n", rf.me)
-		rf.gotEntriesChan <- false
-		reply.Success = false
-		return
-	}
+	// ???
+	// if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex-1].Term != args.PreLogTerm {
+	// 	DPrintf("%v reject entries because of term does not match \n", rf.me)
+	// 	rf.gotEntriesChan <- false
+	// 	reply.Success = false
+	// 	return
+	// }
 
-	// 3, 4just append in logs
-	if args.PrevLogIndex > 0 {
-		rf.log = rf.log[:args.PrevLogIndex]
-	}
+	// 3 If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+	// todo just overrive the term does not match, see the reason at Q&A
 
+	// 4. Append any new entries not already in the log
 	rf.log = append(rf.log, args.Entries...)
+
+	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	lastEntryIndex := len(rf.log)
 	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = len(rf.log)
+		if args.LeaderCommit > lastEntryIndex {
+			rf.commitIndex = lastEntryIndex
 		} else {
 			rf.commitIndex = args.LeaderCommit
 		}
 	}
+
+	// all server: if commitIndex > lastAppliedId: increment lastAppliedId, apply log[lastApplied] to state machine
 	if rf.commitIndex > rf.lastApplied {
 		for i := rf.lastApplied; i < rf.commitIndex; i++ {
 			command := rf.log[i].Command
@@ -329,6 +316,7 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 	if prevLogIndex > 0 {
 		preLogTerm = rf.log[prevLogIndex-1].Term
 	}
+
 	return AppendEntriesArgs{
 		rf.currentTerm, // leader's term
 		rf.me,          // leader's id
