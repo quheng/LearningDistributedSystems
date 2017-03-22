@@ -17,6 +17,7 @@ import (
 	"labrpc"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -292,12 +293,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = rf.log[:args.PrevLogIndex]
 	}
 
-	reply.Success = true
-	rf.gotEntriesChan <- true
-	for index, enter := range args.Entries {
-		applyMsg := ApplyMsg{rf.commitIndex + index + 1, enter.Command, false, nil} // todo
-		rf.applyMsgChan <- applyMsg
-	}
 	rf.log = append(rf.log, args.Entries...)
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit > rf.commitIndex {
@@ -306,7 +301,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.commitIndex = args.LeaderCommit
 		}
 	}
-
+	if rf.commitIndex > rf.lastApplied {
+		for i := rf.lastApplied; i < rf.commitIndex; i++ {
+			command := rf.log[i].Command
+			applyMsg := ApplyMsg{i + 1, command, false, nil} // todo
+			DPrintf("follower %v applied %v in term %v", rf.me, applyMsg, rf.currentTerm)
+			rf.applyMsgChan <- applyMsg
+		}
+		rf.lastApplied = rf.commitIndex
+	}
+	reply.Success = true
+	rf.gotEntriesChan <- true
 	DPrintf("%v accept entries %v in term %v\n", rf.me, args, rf.currentTerm)
 	return
 }
@@ -320,12 +325,9 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 	prevLogIndex := rf.nextIndex[server] - 1
 	preLogTerm := -1
-	var logEntries []Log
+	logEntries := rf.log[prevLogIndex:] // left-open-right-close, index = real index in logs + 1, get log after prevLogIndex
 	if prevLogIndex > 0 {
-		logEntries = rf.log[prevLogIndex:rf.commitIndex] // left-open-right-close, index = real index in logs + 1, get log after prevLogIndex
 		preLogTerm = rf.log[prevLogIndex-1].Term
-	} else {
-		logEntries = rf.log
 	}
 	return AppendEntriesArgs{
 		rf.currentTerm, // leader's term
@@ -336,8 +338,9 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 		rf.commitIndex} // leader’s commitIndex
 }
 
-func (rf *Raft) makeAgreement() {
+func (rf *Raft) makeAgreement(command interface{}) {
 	DPrintf("%v send entries to all servers in term %v", rf.me, rf.currentTerm)
+	committedAmount := int32(0)
 	for index, server := range rf.peers {
 		if index != rf.me {
 			index := index
@@ -358,8 +361,9 @@ func (rf *Raft) makeAgreement() {
 					}
 					if reply.Success {
 						rf.mu.Lock()
-						rf.nextIndex[index] = rf.commitIndex + 1
+						rf.nextIndex[index] = len(rf.log) + 1
 						rf.mu.Unlock()
+						atomic.AddInt32(&committedAmount, 1)
 						return
 					}
 					rf.mu.Lock()
@@ -370,6 +374,23 @@ func (rf *Raft) makeAgreement() {
 			}()
 		}
 	}
+	go func() {
+		for {
+			time.Sleep(50 * time.Millisecond)
+			if command == nil {
+				return // nothing need apply to state machine
+			}
+			if atomic.LoadInt32(&committedAmount) > int32(len(rf.peers)/2) {
+				rf.mu.Lock()
+				rf.commitIndex++
+				applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
+				rf.mu.Unlock()
+				DPrintf("leader %v applied %v in term %v", rf.me, applyMsg, rf.currentTerm)
+				rf.applyMsgChan <- applyMsg
+				return
+			}
+		}
+	}()
 }
 
 // Start at the leader starts the process of adding a new operation to the log;
@@ -393,12 +414,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		DPrintf("leader %v new log %v", rf.me, command)
 		// step 1, leader appends the command to its logs as a new entry
 		rf.log = append(rf.log, Log{rf.currentTerm, command})
-		rf.commitIndex = len(rf.log)
-		applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
-		rf.applyMsgChan <- applyMsg
 		rf.persist()
 		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
-		go rf.makeAgreement()
+		go rf.makeAgreement(command)
 		return rf.commitIndex, rf.currentTerm, isLeader
 	}
 	return -1, -1, isLeader
@@ -546,7 +564,7 @@ LEADER_LOOP:
 		case <-heartbeat:
 			{
 				rf.mu.Lock()
-				rf.makeAgreement()
+				rf.makeAgreement(nil)
 				rf.mu.Unlock()
 			}
 		}
