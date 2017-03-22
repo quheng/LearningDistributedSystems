@@ -257,8 +257,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 2 Reply false if log does not contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	if rf.currentTerm == args.Term && args.PrevLogIndex > rf.commitIndex {
-		DPrintf("%v reject entries because of stale index\n", rf.me)
+	if rf.currentTerm == args.Term && args.PrevLogIndex > len(rf.log) {
+		DPrintf("%v reject entries because of stale index, %v %v\n", rf.me, args.PrevLogIndex, len(rf.log))
 		rf.gotEntriesChan <- false
 		reply.Success = false
 		return
@@ -275,8 +275,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// todo just overrive the term does not match, see the reason at Q&A
 
 	// 4. Append any new entries not already in the log
-	rf.log = append(rf.log, args.Entries...)
-
+	if args.Entries != nil {
+		rf.log = append(rf.log, args.Entries...)
+		DPrintf("%v append entries %v in term %v, log %v", rf.me, args.Entries, rf.currentTerm, rf.log)
+	}
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	lastEntryIndex := len(rf.log)
 	if args.LeaderCommit > rf.commitIndex {
@@ -406,7 +408,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.persist()
 		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
 		go rf.makeAgreement(command)
-		return rf.commitIndex, rf.currentTerm, isLeader
+		return len(rf.log), rf.currentTerm, isLeader
 	}
 	return -1, -1, isLeader
 }
