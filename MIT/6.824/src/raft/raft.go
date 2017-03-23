@@ -28,8 +28,8 @@ const (
 )
 
 const heartBeetsInterval = 120 * time.Millisecond
-const minElectionTimeOut = 550
-const maxElectionTimeOut = 700
+const minElectionTimeOut = 750
+const maxElectionTimeOut = 950
 
 // ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -389,7 +389,7 @@ func (rf *Raft) makeAgreement(committedID int) {
 			if committedAmount > len(rf.peers)/2 {
 				rf.mu.Lock()
 				for i := rf.commitIndex; i < committedID; i++ {
-					applyMsg := ApplyMsg{i, rf.log[i].Command, false, nil} // todo
+					applyMsg := ApplyMsg{i + 1, rf.log[i].Command, false, nil} // todo
 					DPrintf("leader %v applied %v in term %v， log%v", rf.me, applyMsg, rf.currentTerm, rf.log)
 					rf.applyMsgChan <- applyMsg
 				}
@@ -574,10 +574,7 @@ LEADER_LOOP:
 			{
 				rf.mu.Lock()
 				committedID := len(rf.log)
-				DPrintf("&&&&&&")
-
 				rf.mu.Unlock()
-				DPrintf("^^^^^^^^^^")
 				go rf.makeAgreement(committedID)
 			}
 		}
