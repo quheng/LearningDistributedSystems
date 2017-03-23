@@ -156,16 +156,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// 2 b
-	if rf.commitIndex > 0 {
-		if rf.log[rf.commitIndex-1].Term > args.LastLogTerm {
-			DPrintf("%v reject because stale log term for %v\n", rf.me, rf.votedFor)
+	lastLogIndex := len(rf.log)
+	if lastLogIndex > 0 {
+		if rf.log[lastLogIndex-1].Term > args.LastLogTerm {
+			DPrintf("%v reject because stale log term for %v\n", rf.me, args.CandidateID)
 			rf.gotRequestVoteChan <- false
 			reply.VoteGranted = false
 			return
 		}
 
-		if rf.log[rf.commitIndex-1].Term == args.LastLogTerm && rf.commitIndex > args.LastLogIndex {
-			DPrintf("%v reject because stale log index for %v\n", rf.me, rf.votedFor)
+		if rf.log[lastLogIndex-1].Term == args.LastLogTerm && lastLogIndex > args.LastLogIndex {
+			DPrintf("%v reject because stale log index for %v\n", rf.me, args.CandidateID)
 			rf.gotRequestVoteChan <- false
 			reply.VoteGranted = false
 			return
@@ -187,14 +188,15 @@ func (rf *Raft) sendRequestVote(server *labrpc.ClientEnd, args *RequestVoteArgs,
 
 func (rf *Raft) sendRequestVoteToServers() <-chan RequestVoteReply {
 	rf.mu.Lock()
+	lastLogIndex := len(rf.log)
 	lastLogTerm := -1
-	if rf.commitIndex > 0 {
-		lastLogTerm = rf.log[rf.commitIndex-1].Term
+	if lastLogIndex > 0 {
+		lastLogTerm = rf.log[lastLogIndex-1].Term
 	}
 	requestVoteArgs := RequestVoteArgs{
 		rf.currentTerm,
 		rf.me,
-		rf.commitIndex,
+		lastLogIndex,
 		lastLogTerm}
 	DPrintf("%v sendRequestVote in Term %v", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
@@ -271,13 +273,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// }
 
 	// 3 If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-	// todo just overrive the term does not match, see the reason at Q&A
-
-	// 4. Append any new entries not already in the log
-	if args.Entries != nil {
-		rf.log = append(rf.log, args.Entries...)
-		DPrintf("%v append entries %v in term %v, log %v", rf.me, args.Entries, rf.currentTerm, rf.log)
+	logIndex := 0
+	for i := args.PrevLogIndex; i < rf.commitIndex; i++ {
+		if rf.log[i].Term != args.Entries[logIndex].Term {
+			rf.log[i] = args.Entries[logIndex]
+		}
+		logIndex++
 	}
+	// 4. Append any new entries not already in the log
+	if logIndex < len(args.Entries) {
+		rf.log = append(rf.log, args.Entries[logIndex:]...)
+	}
+
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	lastEntryIndex := len(rf.log)
 	if args.LeaderCommit > rf.commitIndex {
@@ -293,14 +300,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for i := rf.lastApplied; i < rf.commitIndex; i++ {
 			command := rf.log[i].Command
 			applyMsg := ApplyMsg{i + 1, command, false, nil} // todo
-			DPrintf("follower %v applied %v in term %v", rf.me, applyMsg, rf.currentTerm)
+			DPrintf("follower %v applied %v in term %v , log: %v\n", rf.me, applyMsg, rf.currentTerm, rf.log)
 			rf.applyMsgChan <- applyMsg
 		}
 		rf.lastApplied = rf.commitIndex
 	}
 	reply.Success = true
-	rf.gotEntriesChan <- true
 	DPrintf("%v accept entries %v in term %v\n", rf.me, args, rf.currentTerm)
+	rf.gotEntriesChan <- true
 	return
 }
 
@@ -379,7 +386,7 @@ func (rf *Raft) makeAgreement(command interface{}) {
 				rf.commitIndex++
 				applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
 				rf.lastApplied = rf.commitIndex
-				DPrintf("leader %v applied %v in term %v", rf.me, applyMsg, rf.currentTerm)
+				DPrintf("leader %v applied %v in term %v， log%v", rf.me, applyMsg, rf.currentTerm, rf.log)
 				rf.mu.Unlock()
 				rf.applyMsgChan <- applyMsg
 				return
