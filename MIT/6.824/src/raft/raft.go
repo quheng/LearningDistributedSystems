@@ -17,7 +17,6 @@ import (
 	"labrpc"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -330,7 +329,7 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 
 func (rf *Raft) makeAgreement(command interface{}) {
 	DPrintf("%v send entries to all servers in term %v", rf.me, rf.currentTerm)
-	committedAmount := int32(0)
+	replyChan := make(chan int)
 	for index, server := range rf.peers {
 		if index != rf.me {
 			index := index
@@ -353,7 +352,7 @@ func (rf *Raft) makeAgreement(command interface{}) {
 						rf.mu.Lock()
 						rf.nextIndex[index] = len(rf.log) + 1
 						rf.mu.Unlock()
-						atomic.AddInt32(&committedAmount, 1)
+						replyChan <- 1
 						return
 					}
 					rf.mu.Lock()
@@ -365,12 +364,14 @@ func (rf *Raft) makeAgreement(command interface{}) {
 		}
 	}
 	go func() {
+		committedAmount := 0
 		for {
-			time.Sleep(50 * time.Millisecond)
 			if command == nil {
 				return // nothing need apply to state machine
 			}
-			if atomic.LoadInt32(&committedAmount) > int32(len(rf.peers)/2) {
+			<-replyChan
+			committedAmount++
+			if committedAmount > len(rf.peers)/2 {
 				rf.mu.Lock()
 				rf.commitIndex++
 				applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
