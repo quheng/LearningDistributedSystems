@@ -313,7 +313,10 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 	prevLogIndex := rf.nextIndex[server] - 1
 	preLogTerm := -1
-	logEntries := rf.log[prevLogIndex:] // left-open-right-close, index = real index in logs + 1, get log after prevLogIndex
+	var logEntries []Log
+	if prevLogIndex > -1 {
+		logEntries = rf.log[prevLogIndex:] // left-open-right-close, index = real index in logs + 1, get log after prevLogIndex
+	}
 	if prevLogIndex > 0 {
 		preLogTerm = rf.log[prevLogIndex-1].Term
 	}
@@ -352,7 +355,7 @@ func (rf *Raft) makeAgreement(command interface{}) {
 						rf.mu.Lock()
 						rf.nextIndex[index] = len(rf.log) + 1
 						rf.mu.Unlock()
-						replyChan <- 1
+						replyChan <- index
 						return
 					}
 					rf.mu.Lock()
@@ -364,7 +367,7 @@ func (rf *Raft) makeAgreement(command interface{}) {
 		}
 	}
 	go func() {
-		committedAmount := 0
+		committedAmount := 1 // included itself
 		for {
 			if command == nil {
 				return // nothing need apply to state machine
@@ -376,8 +379,8 @@ func (rf *Raft) makeAgreement(command interface{}) {
 				rf.commitIndex++
 				applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
 				rf.lastApplied = rf.commitIndex
-				rf.mu.Unlock()
 				DPrintf("leader %v applied %v in term %v", rf.me, applyMsg, rf.currentTerm)
+				rf.mu.Unlock()
 				rf.applyMsgChan <- applyMsg
 				return
 			}
