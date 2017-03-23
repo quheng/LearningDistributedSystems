@@ -28,8 +28,8 @@ const (
 )
 
 const heartBeetsInterval = 120 * time.Millisecond
-const minElectionTimeOut = 750
-const maxElectionTimeOut = 900
+const minElectionTimeOut = 550
+const maxElectionTimeOut = 700
 
 // ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -300,13 +300,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for i := rf.lastApplied; i < rf.commitIndex; i++ {
 			command := rf.log[i].Command
 			applyMsg := ApplyMsg{i + 1, command, false, nil} // todo
-			DPrintf("follower %v applied %v in term %v , log: %v\n", rf.me, applyMsg, rf.currentTerm, rf.log)
+			DPrintf("follower %v applied %v in term %v, log: %v\n", rf.me, applyMsg, rf.currentTerm, rf.log)
 			rf.applyMsgChan <- applyMsg
 		}
 		rf.lastApplied = rf.commitIndex
 	}
 	reply.Success = true
-	DPrintf("%v accept entries %v in term %v\n", rf.me, args, rf.currentTerm)
+	DPrintf("%v accept entries %v in term %v, log: %v\n", rf.me, args, rf.currentTerm, rf.log)
 	rf.gotEntriesChan <- true
 	return
 }
@@ -316,13 +316,15 @@ func (rf *Raft) sendAppendEntries(server *labrpc.ClientEnd, args *AppendEntriesA
 	return server.Call("Raft.AppendEntries", args, reply)
 }
 
-// callee add lock
-func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
+// callee need lock
+func (rf *Raft) setAppendEntriesArgs(server int, committedID int) AppendEntriesArgs {
 	prevLogIndex := rf.nextIndex[server] - 1
 	preLogTerm := -1
 	var logEntries []Log
 	if prevLogIndex > -1 {
-		logEntries = rf.log[prevLogIndex:] // left-open-right-close, index = real index in logs + 1, get log after prevLogIndex
+		logEntries = rf.log[prevLogIndex:committedID] // left-open-right-close, index = real index in logs + 1, get log after prevLogIndex
+	} else {
+		logEntries = rf.log[:committedID]
 	}
 	if prevLogIndex > 0 {
 		preLogTerm = rf.log[prevLogIndex-1].Term
@@ -337,8 +339,7 @@ func (rf *Raft) setAppendEntriesArgs(server int) AppendEntriesArgs {
 		rf.commitIndex} // leader’s commitIndex
 }
 
-func (rf *Raft) makeAgreement(command interface{}) {
-	DPrintf("%v send entries to all servers in term %v", rf.me, rf.currentTerm)
+func (rf *Raft) makeAgreement(committedID int) {
 	replyChan := make(chan int)
 	for index, server := range rf.peers {
 		if index != rf.me {
@@ -352,7 +353,8 @@ func (rf *Raft) makeAgreement(command interface{}) {
 					reply := new(AppendEntriesReply)
 					reply.Success = false
 					rf.mu.Lock()
-					appendEntriesArgs := rf.setAppendEntriesArgs(index)
+					appendEntriesArgs := rf.setAppendEntriesArgs(index, committedID)
+					DPrintf("leader %v appendEntriesArgs to %v %v in term %v", rf.me, index, appendEntriesArgs, rf.currentTerm)
 					rf.mu.Unlock()
 					ok := rf.sendAppendEntries(server, &appendEntriesArgs, reply)
 					if !ok {
@@ -376,19 +378,24 @@ func (rf *Raft) makeAgreement(command interface{}) {
 	go func() {
 		committedAmount := 1 // included itself
 		for {
-			if command == nil {
+			rf.mu.Lock()
+			if rf.commitIndex == len(rf.log) {
+				rf.mu.Unlock()
 				return // nothing need apply to state machine
 			}
+			rf.mu.Unlock()
 			<-replyChan
 			committedAmount++
 			if committedAmount > len(rf.peers)/2 {
 				rf.mu.Lock()
-				rf.commitIndex++
-				applyMsg := ApplyMsg{rf.commitIndex, command, false, nil} // todo
-				rf.lastApplied = rf.commitIndex
-				DPrintf("leader %v applied %v in term %v， log%v", rf.me, applyMsg, rf.currentTerm, rf.log)
+				for i := rf.commitIndex; i < committedID; i++ {
+					applyMsg := ApplyMsg{i, rf.log[i].Command, false, nil} // todo
+					DPrintf("leader %v applied %v in term %v， log%v", rf.me, applyMsg, rf.currentTerm, rf.log)
+					rf.applyMsgChan <- applyMsg
+				}
+				rf.commitIndex = committedID
+				rf.lastApplied = committedID
 				rf.mu.Unlock()
-				rf.applyMsgChan <- applyMsg
 				return
 			}
 		}
@@ -418,7 +425,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, Log{rf.currentTerm, command})
 		rf.persist()
 		// step 2, issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry.
-		go rf.makeAgreement(command)
+		go rf.makeAgreement(len(rf.log))
 		return len(rf.log), rf.currentTerm, isLeader
 	}
 	return -1, -1, isLeader
@@ -566,8 +573,12 @@ LEADER_LOOP:
 		case <-heartbeat:
 			{
 				rf.mu.Lock()
-				rf.makeAgreement(nil)
+				committedID := len(rf.log)
+				DPrintf("&&&&&&")
+
 				rf.mu.Unlock()
+				DPrintf("^^^^^^^^^^")
+				go rf.makeAgreement(committedID)
 			}
 		}
 		rf.mu.Lock()
