@@ -50,16 +50,15 @@ type Log struct {
 // Raft is a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+	mu           sync.Mutex          // Lock to protect shared access to this peer's state
+	peers        []*labrpc.ClientEnd // RPC end points of all peers
+	persister    *Persister          // Object to hold this peer's persisted state
+	me           int                 // this peer's index into peers[]
+	applyMsgChan chan ApplyMsg       // send an ApplyMsg to the service (or tester)
 
 	// customer state
-	state              string        // server state, can be LEADER, FOLLOWER or CANDIDATE
-	gotEntriesChan     chan bool     // got entries, send whether accept these entries
-	gotRequestVoteChan chan bool     // got request vote, send whether accept the vote
-	applyMsgChan       chan ApplyMsg // send an ApplyMsg to the service (or tester)
+	state           string   // server state, can be LEADER, FOLLOWER or CANDIDATE
+	gotLegalReqChan chan int // got entries, send whether accept these entries
 
 	// persistent state on all servers
 	currentTerm int   // latest term server has seen( initialized to 0 on first boot, increases monotonically)
@@ -339,7 +338,7 @@ func (rf *Raft) setAppendEntriesArgs(server int, committedID int) AppendEntriesA
 		rf.commitIndex} // leader’s commitIndex
 }
 
-func (rf *Raft) makeAgreement(committedID int) {
+func (rf *Raft) makeAgreement() {
 	replyChan := make(chan int)
 	for index, server := range rf.peers {
 		if index != rf.me {
@@ -400,6 +399,10 @@ func (rf *Raft) makeAgreement(committedID int) {
 			}
 		}
 	}()
+}
+
+func (rf *Raft) makeAgreement(committedID int) {
+
 }
 
 // Start at the leader starts the process of adding a new operation to the log;
@@ -470,10 +473,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	rf.nextIndex = make([]int, len(peers)) // initialize in leader stuff
-	rf.matchIndex = make([]int, 0)         // todo
-
-	rf.state = FOLLOWER
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -486,11 +487,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.mu.Unlock()
 			switch state {
 			case FOLLOWER:
-				rf.followerStuff()
+				rf.followerPhase()
 			case CANDIDATE:
-				rf.candidateStuff()
+				rf.candidatePhase()
 			case LEADER:
-				rf.leaderStuff()
+				rf.leaderPhase()
 			}
 		}
 	}(rf)
@@ -502,92 +503,55 @@ func getElectionTimeout() <-chan time.Time {
 	return time.After(time.Duration(randTime) * time.Millisecond)
 }
 
-// incoming RequestVote RPC has a higher term that you,
-// you should first step down and adopt their term (thereby resetting votedFor), and then handle the RPC
-// note: use lock in callee
-func (rf *Raft) resetState(term int) {
-	rf.state = FOLLOWER
-	rf.currentTerm = term
-	rf.votedFor = -1
-}
-
-// follower state
-func (rf *Raft) followerStuff() {
-	timeOut := getElectionTimeout() // note: if the term in the AppendEntries arguments is outdated, do not reset timer
-FOLLOWER_LOOP:
+func (rf *Raft) followerPhase() {
+	timeout := getElectionTimeout() // note: if the term in the AppendEntries arguments is outdated, do not reset timer
 	for {
 		select {
 		// get entries from leader
 		// only update election timeout when getting an illegal request
-		case result := <-rf.gotEntriesChan:
+		case <-rf.gotLegalReqChan:
 			{
-				if result {
-					timeOut = getElectionTimeout()
-				}
-			}
-		// got an vote request from candidate
-		case result := <-rf.gotRequestVoteChan:
-			{
-				if result {
-					DPrintf("%v refresh timeout", rf.me)
-					timeOut = getElectionTimeout()
-				}
+				timeout = getElectionTimeout()
 			}
 		// If election timeout elapses without receiving AppendEntries
 		// RPC from current leader or granting vote to candidate: convert to candidate
-		case <-timeOut: // received requests will refresh time
+		case <-timeout: // received requests will refresh time
 			{
 				DPrintf("%v getElectionTimeout \n", rf.me)
 				rf.mu.Lock()
 				rf.state = CANDIDATE
 				rf.mu.Unlock()
-				break FOLLOWER_LOOP
+				return
 			}
 		}
 	}
 }
 
-func (rf *Raft) leaderStuff() {
+func (rf *Raft) leaderPhase() {
+	// initialize leader state
 	heartbeat := time.Tick(heartBeetsInterval)
 	rf.mu.Lock()
-	state := rf.state
-	for index := range rf.peers {
-		rf.nextIndex[index] = rf.commitIndex + 1
+	for i := range rf.peers {
+		rf.nextIndex[i] = len(rf.log) + 1
+		rf.matchIndex[i] = 0
 	}
+	go rf.makeAgreement(committedID)
 	rf.mu.Unlock()
-LEADER_LOOP:
-	for state == LEADER {
+
+	for {
 		select {
-		case result := <-rf.gotEntriesChan:
+		case <-rf.gotLegalReqChan:
 			{
-				if result {
-					break LEADER_LOOP
-				}
-			}
-		case result := <-rf.gotRequestVoteChan:
-			{
-				if result {
-					break LEADER_LOOP
-				}
+				rf.state = FOLLOWER
 			}
 		case <-heartbeat:
 			{
-				rf.mu.Lock()
-				committedID := len(rf.log)
-				rf.mu.Unlock()
 				go rf.makeAgreement(committedID)
 			}
 		}
-		rf.mu.Lock()
-		state = rf.state
-		rf.mu.Unlock()
 	}
 }
 
-// A candidate continues in this state until one of three things happens:
-// (a) it wins the election,
-// (b) another server establishes itself as leader, or
-// (c) a period of time goes by with no winner.
 func (rf *Raft) candidateStuff() {
 	//On conversion to candidate, start election:
 	//1. Increment currentTerm
@@ -597,67 +561,21 @@ func (rf *Raft) candidateStuff() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	state := rf.state
 	rf.mu.Unlock()
 	electionTimeout := getElectionTimeout()
-	replayChan := rf.sendRequestVoteToServers()
-	gotVotes := 1 // initial to it self
-CANDIDATE_LOOP:
-	for state == CANDIDATE {
+	for {
 		select {
-		// (a) wins an election
-		// receives votes from a majority of the servers in the full cluster for the same term.
-		case replay := <-replayChan:
+		case <-rf.gotLegalReqChan:
 			{
-				isAchieved := func() bool {
-					DPrintf("%v receive votes %v", rf.me, replay)
-					rf.mu.Lock() // notice defer is function scope
-					defer rf.mu.Unlock()
-
-					if replay.Term > rf.currentTerm {
-						rf.currentTerm = replay.Term
-						return false
-					}
-
-					if !replay.VoteGranted {
-						return false
-					}
-					gotVotes++
-					DPrintf("follower %v got %v votes require %v in term %v", rf.me, gotVotes, len(rf.peers)/2+1, rf.currentTerm)
-					if gotVotes > len(rf.peers)/2 {
-						rf.state = LEADER
-						return true
-					}
-					return false
-				}()
-				if isAchieved {
-					break CANDIDATE_LOOP
-				}
-			}
-		// (b) another server established itself as leader
-		// handled in AppendEntries
-		case result := <-rf.gotEntriesChan:
-			{
-				if result {
-					break CANDIDATE_LOOP
-				}
-			}
-		case result := <-rf.gotRequestVoteChan:
-			{
-				if result {
-					break CANDIDATE_LOOP
-				}
+				rf.state = FOLLOWER
+				return
 			}
 		// (c) a period of time goes by with no winner
 		// start a new election by incrementing its term and initiating another round of Request-Vote RPCs.
 		case <-electionTimeout:
 			{
-				//incrementing term in next candidate loop
-				break CANDIDATE_LOOP
+				return
 			}
 		}
-		rf.mu.Lock()
-		state = rf.state
-		rf.mu.Unlock()
 	}
 }
