@@ -401,7 +401,7 @@ func (rf *Raft) makeAgreement() {
 	}()
 }
 
-func (rf *Raft) makeAgreement(committedID int) {
+func (rf *Raft) election(replyChan chan RequestVoteReply) {
 
 }
 
@@ -539,14 +539,20 @@ func (rf *Raft) leaderPhase() {
 	rf.mu.Unlock()
 
 	for {
+		replyChan := make(chan AppendEntriesReply)
 		select {
+		case reply := <-replyChan:
+			{
+				// todo
+			}
 		case <-rf.gotLegalReqChan:
 			{
 				rf.state = FOLLOWER
+				return
 			}
 		case <-heartbeat:
 			{
-				go rf.makeAgreement(committedID)
+				go rf.makeAgreement(replyChan)
 			}
 		}
 	}
@@ -558,13 +564,45 @@ func (rf *Raft) candidateStuff() {
 	//2. Vote for self
 	//3. Reset election timer
 	//4. Send RequestVote RPCs to all other servers
+	replyChan := make(chan AppendEntriesReply)
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	rf.mu.Unlock()
+	rf.election(replyChan)
+	go rf.mu.Unlock()
 	electionTimeout := getElectionTimeout()
+	gotVotes := 1 // initial to it self
 	for {
 		select {
+		case reply := <-replyChan:
+			{
+				isAchieved := func() bool {
+					DPrintf("%v receive votes %v", rf.me, replay)
+					rf.mu.Lock() // notice defer is function scope
+					defer rf.mu.Unlock()
+
+					if replay.Term > rf.currentTerm {
+						rf.currentTerm = replay.Term
+						rf.state = FOLLOWER
+						return true
+					}
+
+					if !replay.VoteGranted {
+						return false
+					}
+					gotVotes++
+					DPrintf("follower %v got %v votes require %v in term %v", rf.me, gotVotes, len(rf.peers)/2+1, rf.currentTerm)
+					if gotVotes > len(rf.peers)/2 {
+						rf.state = LEADER
+						return true
+					}
+					return false
+				}()
+
+				if isAchieved {
+					return
+				}
+			}
 		case <-rf.gotLegalReqChan:
 			{
 				rf.state = FOLLOWER
